@@ -1,5 +1,6 @@
 # Solver benchmark / integration test on REAL RaptorQ systems (src/constraints.bend).
-# Usage:  bend tests/solver_bench.bend -o sb;  ./sb [--threads N] -- <K> <mode> [<T octets, default 16>]
+# Usage:  bend tests/solver_bench.bend -o sb;  ./sb [--threads N] -- <K> <mode> [<T octets, default 16> [<d>]]
+#   d = log2 of the number of symbol slices solved in parallel (Solver.solve_par), default 0
 #   mode 0 = Solver.solve_p (inactivation) + verify, 1 = Solver.solve_dense (oracle) + verify, 2 = only build the rows,
 #   3 = print the inactive-set size, 4 = solve only (not verified), 5 = timed inactivation solve, 6 = timed dense oracle: prints "rows ms", "solve ms" (rows built twice,
 #   the second build is subtracted) and a checksum of C.
@@ -86,12 +87,12 @@ def verify(src: List<&2, G.Vec>, +sp: T.SP, +tr: C.ITree, +i: U32, bad: U32) -> 
 def rows_of(+sp: T.SP, +tw: U32, +src: List<&2, G.Vec>) -> List<&2, Y.Row>:
   List.append(&2, Y.Row, C.fixed(sp, (4 * tw : U32)), C.source_rows(sp, src))
 
-def solve(mode: U32, +sp: T.SP, +tw: U32, +src: List<&2, G.Vec>) -> Maybe<&2, List<&2, G.Vec>>:
+def solve(mode: U32, +sp: T.SP, +tw: U32, +d: U32, +src: List<&2, G.Vec>) -> Maybe<&2, List<&2, G.Vec>>:
   match mode:
     case 1:
       S.Solver.solve_dense(R.L(sp), rows_of(sp, tw, src))
     case _:
-      S.Solver.solve_p(R.L(sp), R.P(sp), rows_of(sp, tw, src))
+      S.Solver.solve_par(R.L(sp), R.P(sp), d, rows_of(sp, tw, src))
 
 def report2(bad: U32) -> IO(Unit):
   match bad:
@@ -147,37 +148,37 @@ def nterms(rs: List<&2, Y.Row>, acc: U32) -> U32:
         case Y.Row{cols, rhs}:
           nterms(rest, (acc + U32.from_nat(List.length(&2, Y.Term, cols)) : U32))
 
-def timed(mode: U32, +sp: T.SP, +tw: U32, +src: List<&2, G.Vec>) -> IO(Unit):
+def timed(mode: U32, +sp: T.SP, +tw: U32, +d: U32, +src: List<&2, G.Vec>) -> IO(Unit):
   do IO<Unit>:
     +t0 : Nat <- IO.now()
     IO.print("rows built, terms: " ++ U32.show(nterms(rows_of(sp, tw, src), 0)))
     +t1 : Nat <- IO.now()
-    IO.print("checksum of C: " ++ U32.show(msum(solve(mode, sp, tw, src))))
+    IO.print("checksum of C: " ++ U32.show(msum(solve(mode, sp, tw, d, src))))
     +t2 : Nat <- IO.now()
-    IO.print("T=" ++ U32.show((4 * tw : U32)) ++ " octets: rows ms=" ++ Nat.show((t1 - t0 : Nat)) ++ " solve ms=" ++ Nat.show((t2 - t1 - (t1 - t0) : Nat)) ++ " (total with 2nd row build " ++ Nat.show((t2 - t1 : Nat)) ++ ")")
+    IO.print("T=" ++ U32.show((4 * tw : U32)) ++ " octets, slices 2^" ++ U32.show(d) ++ ": rows ms=" ++ Nat.show((t1 - t0 : Nat)) ++ " solve ms=" ++ Nat.show((t2 - t1 - (t1 - t0) : Nat)) ++ " (total with 2nd row build " ++ Nat.show((t2 - t1 : Nat)) ++ ")")
 
-def go2(mode: U32, +sp: T.SP, +tw: U32, +src: List<&2, G.Vec>) -> IO(Unit):
+def go2(mode: U32, +sp: T.SP, +tw: U32, +d: U32, +src: List<&2, G.Vec>) -> IO(Unit):
   match mode:
     case 2:
       IO.print("rows built: " ++ U32.show(U32.from_nat(List.length(&2, Y.Row, rows_of(sp, tw, src)))))
     case 3:
       IO.print("inactive columns after phase 1: " ++ U32.show(S.Solver.inactive_count(R.L(sp), R.P(sp), rows_of(sp, tw, src))))
     case 4:
-      solved_only(solve(0, sp, tw, src))
+      solved_only(solve(0, sp, tw, d, src))
     case 5:
-      timed(0, sp, tw, src)
+      timed(0, sp, tw, d, src)
     case 6:
-      timed(1, sp, tw, src)
+      timed(1, sp, tw, d, src)
     case _:
-      report(solve(mode, sp, tw, src), src, sp)
+      report(solve(mode, sp, tw, d, src), src, sp)
 
-def go(+k: U32, +mode: U32, +sp: T.SP, +tw: U32, +src: List<&2, G.Vec>) -> IO(Unit):
+def go(+k: U32, +mode: U32, +sp: T.SP, +tw: U32, +d: U32, +src: List<&2, G.Vec>) -> IO(Unit):
   do IO<Unit>:
     IO.print("K=" ++ U32.show(k) ++ " K'=" ++ U32.show(R.Kp(sp)) ++ " L=" ++ U32.show(R.L(sp)) ++ " P=" ++ U32.show(R.P(sp)) ++ " mode=" ++ U32.show(mode))
-    go2(mode, sp, tw, src)
+    go2(mode, sp, tw, d, src)
 
-def run(+k: U32, mode: U32, +tw: U32) -> IO(Unit):
-  go(k, mode, sp_of(k), tw, syms(U32.to_nat(k), tw, (k * 65536 + 16 : U32), Nil{}))
+def run(+k: U32, mode: U32, +tw: U32, +d: U32) -> IO(Unit):
+  go(k, mode, sp_of(k), tw, d, syms(U32.to_nat(k), tw, (k * 65536 + 16 : U32), Nil{}))
 
 def arg_u32.go(m: Maybe<String>, d: U32) -> U32:
   match m:
@@ -191,14 +192,16 @@ def rd(s: String, d: U32) -> U32:
 
 def run_args(args: List<String>) -> IO(Unit):
   match args:
-    case prog <> ks <> ms <> ts <> rest:
-      run(rd(ks, 10), rd(ms, 0), U32.shrn((rd(ts, 16) + 3 : U32), 2n))
+    case prog <> ks <> ms <> ts <> ds <> rest:
+      run(rd(ks, 10), rd(ms, 0), U32.shrn((rd(ts, 16) + 3 : U32), 2n), rd(ds, 0))
+    case prog <> ks <> ms <> ts <> Nil{}:
+      run(rd(ks, 10), rd(ms, 0), U32.shrn((rd(ts, 16) + 3 : U32), 2n), 0)
     case prog <> ks <> ms <> Nil{}:
-      run(rd(ks, 10), rd(ms, 0), 4)
+      run(rd(ks, 10), rd(ms, 0), 4, 0)
     case prog <> ks <> Nil{}:
-      run(rd(ks, 10), 0, 4)
+      run(rd(ks, 10), 0, 4, 0)
     case _:
-      run(10, 0, 4)
+      run(10, 0, 4, 0)
 
 def main() -> IO(Unit):
   do IO<Unit>:
