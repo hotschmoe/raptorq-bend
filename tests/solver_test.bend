@@ -48,10 +48,10 @@ def after_row(xs: List<&2, U32>) -> List<&2, U32>:
     case _:
       Nil{}
 
-def rows_of(n: Nat, xs: List<&2, U32>, acc: List<T.Row>) -> List<T.Row>:
+def rows_of(n: Nat, xs: List<&2, U32>, acc: List<&2, T.Row>) -> List<&2, T.Row>:
   match n:
     case 0n:
-      List.reverse(&1, T.Row, acc)
+      List.reverse(&2, T.Row, acc)
     case 1n+p:
       +s = {xs : List<&2, U32>}
       rows_of(p, after_row(s), row_of(s) <> acc)
@@ -71,7 +71,7 @@ def band(a: Bool, b: Bool) -> Bool:
     case False{}:
       False{}
 
-def flat(xs: List<G.Vec>) -> List<&2, U32>:
+def flat(xs: List<&2, G.Vec>) -> List<&2, U32>:
   match xs:
     case Nil{}:
       Nil{}
@@ -95,7 +95,7 @@ def fail(b: Bool) -> U32:
       1
 
 # 0 = ok, 1 = wrong
-def check(res: Maybe<List<G.Vec>>, +ex: U32, sol: List<&2, U32>) -> U32:
+def check(res: Maybe<&2, List<&2, G.Vec>>, +ex: U32, sol: List<&2, U32>) -> U32:
   match res:
     case None{}:
       fail(U32.is_eq(ex, 0))
