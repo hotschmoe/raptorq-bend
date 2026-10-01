@@ -106,15 +106,79 @@ def check(res: Maybe<&2, List<&2, G.Vec>>, +ex: U32, sol: List<&2, U32>) -> U32:
         case _:
           fail(lst_eq(flat(v), sol))
 
+
+# ---- plan / apply (Solver.plan + Solver.apply) -------------------------------------------------------
+# Payload variants of the same system, to show a plan is independent of the symbols: (B) only the first word of every
+# symbol (T = 4 octets), (C) every symbol followed by 3 * itself (T doubled).  The solution of B is the first word of every
+# solution symbol, the one of C is every solution symbol followed by 3 * itself (byte-wise linear algebra).
+def first_word(ws: List<&2, U32>) -> G.Vec:
+  match ws:
+    case w <> _:
+      G.Vec.from_list([w])
+    case _:
+      G.VNil{}
+
+def first_all(vs: List<&2, G.Vec>) -> List<&2, G.Vec>:
+  match vs:
+    case Nil{}:
+      Nil{}
+    case v <> t:
+      first_word(G.Vec.to_list(v, Nil{})) <> first_all(t)
+
+def mul3(ws: List<&2, U32>) -> List<&2, U32>:
+  match ws:
+    case Nil{}:
+      Nil{}
+    case w <> t:
+      G.mulw(3, w) <> mul3(t)
+
+def cat3(+ws: List<&2, U32>) -> G.Vec:
+  G.Vec.from_list(List.append(&2, U32, ws, mul3(ws)))
+
+def cat3_all(vs: List<&2, G.Vec>) -> List<&2, G.Vec>:
+  match vs:
+    case Nil{}:
+      Nil{}
+    case v <> t:
+      cat3(G.Vec.to_list(v, Nil{})) <> cat3_all(t)
+
+# the solution as symbols of 2 words
+def sol_syms(xs: List<&2, U32>) -> List<&2, G.Vec>:
+  match xs:
+    case a <> b <> t:
+      G.Vec.from_list([a, b]) <> sol_syms(t)
+    case _:
+      Nil{}
+
+# 0 = ok, bit0: apply(plan) wrong, bit1: plan reused on payload B wrong, bit2: on payload C wrong
+def pc3(+plan: S.Plan, +rhs: List<&2, G.Vec>, +sol: List<&2, G.Vec>) -> U32:
+  a = fail(lst_eq(flat(S.Solver.apply(plan, rhs)), flat(sol)))
+  b = fail(lst_eq(flat(S.Solver.apply(plan, first_all(rhs))), flat(first_all(sol))))
+  c = fail(lst_eq(flat(S.Solver.apply(plan, cat3_all(rhs))), flat(cat3_all(sol))))
+  (a + 2 * b + 4 * c : U32)
+
+def pcheck(pl: Maybe<&2, S.Plan>, +ex: U32, rhs: List<&2, G.Vec>, sol: List<&2, G.Vec>) -> U32:
+  match pl:
+    case None{}:
+      (7 * fail(U32.is_eq(ex, 0)) : U32)
+    case Some{plan}:
+      match ex:
+        case 0:
+          7
+        case _:
+          pc3(plan, rhs, sol)
+
 # ---- one system -----------------------------------------------------------------------------
-# returns failures: bit 0 = dense oracle wrong, bit 1 = inactivation solver wrong, bit 2 = symbol-sliced solver wrong
+# returns failures: bit 0 = dense oracle wrong, bit 1 = inactivation solver wrong, bit 2 = symbol-sliced solver wrong,
+# bits 3-5 = plan/apply (see pc3)
 def run_sys(+l: U32, +p: U32, nr: U32, +ex: U32, +body: List<&2, U32>) -> U32:
   +nrn = U32.to_nat(nr)
   +sol = List.take(&2, U32, after_rows(nrn, body), U32.to_nat((2 * l : U32)))
   a = check(S.Solver.solve_dense(l, rows_of(nrn, body, Nil{})), ex, sol)
   b = check(S.Solver.solve_p(l, p, rows_of(nrn, body, Nil{})), ex, sol)
   c = check(S.Solver.solve_par(l, p, 1, rows_of(nrn, body, Nil{})), ex, sol)
-  (a + 2 * b + 4 * c : U32)
+  d = pcheck(S.Solver.plan(l, p, rows_of(nrn, body, Nil{})), ex, S.rows_rhs(rows_of(nrn, body, Nil{}), Nil{}), sol_syms(sol))
+  (a + 2 * b + 4 * c + 8 * d : U32)
 
 def next_sys(+l: U32, nr: U32, ex: U32, body: List<&2, U32>) -> List<&2, U32>:
   match ex:

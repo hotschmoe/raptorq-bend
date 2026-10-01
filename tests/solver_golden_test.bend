@@ -5,6 +5,9 @@
 # Cases: K in {1,2,10,26} x T in {16,32}, (50,16), (100,16), (500,4), (1000,4).
 # Solver.solve_p (inactivation) is checked on every case, Solver.solve_dense (oracle) for K <= 100, and
 # Solver.solve_par with d = 3 (symbols sliced into up to 8 word ranges: 4 slices for T=16, 8 for T=32) on every case.
+# Plan / apply: Solver.plan on the real system, Solver.apply must give the RFC intermediate symbols bit for bit (also
+# Solver.apply_par with d = 3), and the SAME plan applied to two other payloads (first word of every symbol, T = 4;
+# every symbol followed by 3 * itself, T doubled) must give the correspondingly transformed intermediate symbols.
 import Base
 import ../src/gf256.bend as G
 import ../src/types.bend as Y
@@ -73,6 +76,57 @@ def check(res: Maybe<&2, List<&2, G.Vec>>, expect: List<&2, U32>) -> U32:
 def rows_of(+sp: T.SP, +t: U32, +src: List<&2, G.Vec>) -> List<&2, Y.Row>:
   List.append(&2, Y.Row, C.fixed(sp, t), C.source_rows(sp, src))
 
+
+# ---- plan / apply: payload variants (see the header) ---------------------------------------------------------
+def first_word(ws: List<&2, U32>) -> G.Vec:
+  match ws:
+    case w <> _:
+      G.Vec.from_list([w])
+    case _:
+      G.VNil{}
+
+def first_all(vs: List<&2, G.Vec>) -> List<&2, G.Vec>:
+  match vs:
+    case Nil{}:
+      Nil{}
+    case v <> t:
+      first_word(G.Vec.to_list(v, Nil{})) <> first_all(t)
+
+def mul3(ws: List<&2, U32>) -> List<&2, U32>:
+  match ws:
+    case Nil{}:
+      Nil{}
+    case w <> t:
+      G.mulw(3, w) <> mul3(t)
+
+def cat3(+ws: List<&2, U32>) -> G.Vec:
+  G.Vec.from_list(List.append(&2, U32, ws, mul3(ws)))
+
+def cat3_all(vs: List<&2, G.Vec>) -> List<&2, G.Vec>:
+  match vs:
+    case Nil{}:
+      Nil{}
+    case v <> t:
+      cat3(G.Vec.to_list(v, Nil{})) <> cat3_all(t)
+
+def eqv(a: List<&2, G.Vec>, b: List<&2, G.Vec>) -> U32:
+  fail(lst_eq(flat(a), flat(b)))
+
+# bit0: apply wrong, bit1: apply_par(3) wrong, bit2: payload B wrong, bit3: payload C wrong
+def plan_go(pl: Maybe<&2, S.Plan>, +rhs: List<&2, G.Vec>, +exp: List<&2, G.Vec>) -> U32:
+  match pl:
+    case None{}:
+      15
+    case Some{+plan}:
+      a = eqv(S.Solver.apply(plan, rhs), exp)
+      b = eqv(S.Solver.apply_par(3, plan, rhs), exp)
+      c = eqv(S.Solver.apply(plan, first_all(rhs)), first_all(exp))
+      d = eqv(S.Solver.apply(plan, cat3_all(rhs)), cat3_all(exp))
+      (a + 2 * b + 4 * c + 8 * d : U32)
+
+def plan_check(+sp: T.SP, +t: U32, +src: List<&2, G.Vec>, +tw: U32, exp: List<&2, U32>) -> U32:
+  plan_go(S.Solver.plan(R.L(sp), R.P(sp), rows_of(sp, t, src)), S.rows_rhs(rows_of(sp, t, src), Nil{}), split_syms(U32.to_nat(R.L(sp)), U32.to_nat(tw), exp, Nil{}))
+
 def dense_check.go(le: Bool, +sp: T.SP, +t: U32, +src: List<&2, G.Vec>, expect: List<&2, U32>) -> U32:
   match le:
     case True{}:
@@ -83,7 +137,7 @@ def dense_check.go(le: Bool, +sp: T.SP, +t: U32, +src: List<&2, G.Vec>, expect: 
 def dense_check(+k: U32, sp: T.SP, t: U32, src: List<&2, G.Vec>, expect: List<&2, U32>) -> U32:
   dense_check.go(U32.is_le(k, 100), sp, t, src, expect)
 
-# returns bit0 = inactivation solver wrong, bit1 = dense oracle wrong, bit2 = symbol-sliced solver wrong
+# returns bit0 = inactivation solver wrong, bit1 = dense oracle wrong, bit2 = symbol-sliced solver wrong, bits 3-6 = plan_go
 def run_case(+k: U32, +t: U32, +body: List<&2, U32>) -> U32:
   +sp = sp_of(k)
   +tw = U32.shrn(t, 2n)
@@ -92,7 +146,8 @@ def run_case(+k: U32, +t: U32, +body: List<&2, U32>) -> U32:
   a = check(S.Solver.solve_p(R.L(sp), R.P(sp), rows_of(sp, t, src)), exp)
   b = dense_check(k, sp, t, src, exp)
   c = check(S.Solver.solve_par(R.L(sp), R.P(sp), 3, rows_of(sp, t, src)), exp)
-  (a + 2 * b + 4 * c : U32)
+  d = plan_check(sp, t, src, tw, exp)
+  (a + 2 * b + 4 * c + 8 * d : U32)
 
 def next_case(+k: U32, +t: U32, body: List<&2, U32>) -> List<&2, U32>:
   List.drop(&2, U32, body, U32.to_nat(((k + R.L(sp_of(k))) * U32.shrn(t, 2n) : U32)))

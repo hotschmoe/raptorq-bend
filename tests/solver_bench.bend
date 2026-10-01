@@ -5,7 +5,11 @@
 #   3 = print the inactive-set size, 4 = solve only (not verified),
 #   5 = timed inactivation solve: prints "rows ms", "solve ms" (the rows are built twice, the second build is
 #       subtracted) and a checksum of C,  6 = same for the dense oracle,
-#   8 = timed Solver.solve_auto (slicing depth from the thread count; time includes the row build).
+#   8 = timed Solver.solve_auto (slicing depth from the thread count; time includes the row build),
+#   9 = timed Solver.plan, then Solver.apply (d = slice depth, Solver.apply_par) on the same rows: prints
+#       "plan ms", "apply ms" and the checksum of C (equal to mode 5's),
+#   10 = plan once, apply to the payload (T octets) and to a second payload with 2T octets, both verified by
+#       re-encoding (plan reuse across symbol sizes).
 # Builds the K'x(S+H+K') system with LCG-random source symbols (T octets), solves it, then (modes 0/1) checks
 # C by re-encoding every source ISI (Constraints.encode must give back the source symbol).
 # Prints "OK ..." and exits 0, or dies with exit code 1.
@@ -168,6 +172,101 @@ def timed_auto(+sp: T.SP, +tw: U32, +src: List<&2, G.Vec>) -> IO(Unit):
     +t1 : Nat <- IO.now()
     IO.print("T=" ++ U32.show((4 * tw : U32)) ++ " octets, solve_auto: rows+solve ms=" ++ Nat.show((t1 - t0 : Nat)))
 
+# size of a plan (forces all of it)
+def lst_len(xs: List<&2, U32>, acc: U32) -> U32:
+  match xs:
+    case Nil{}:
+      acc
+    case h <> t:
+      lst_len(t, (acc + 1 : U32))
+
+def tl_len(xs: List<&2, Y.Term>, acc: U32) -> U32:
+  match xs:
+    case Nil{}:
+      acc
+    case h <> t:
+      tl_len(t, (acc + 1 : U32))
+
+def lg_len(xs: List<&2, S.Lg>, acc: U32) -> U32:
+  match xs:
+    case Nil{}:
+      acc
+    case h <> t:
+      lg_len(t, (acc + 1 : U32))
+
+def pp_size(xs: List<&2, S.PP>, acc: U32) -> U32:
+  match xs:
+    case Nil{}:
+      acc
+    case S.PP{id, pc, finv, log, oc} <> t:
+      pp_size(t, (acc + 1 + lg_len(log, 0) + tl_len(oc, 0) : U32))
+
+def tr_size(xs: List<&2, S.TR>, acc: U32) -> U32:
+  match xs:
+    case Nil{}:
+      acc
+    case S.TR{id, log} <> t:
+      tr_size(t, (acc + 1 + lg_len(log, 0) : U32))
+
+def tc_size(xs: List<&2, S.TC>, acc: U32) -> U32:
+  match xs:
+    case Nil{}:
+      acc
+    case S.TC{col, ts} <> t:
+      tc_size(t, (acc + 1 + tl_len(ts, 0) : U32))
+
+def plan_size(m: Maybe<&2, S.Plan>) -> U32:
+  match m:
+    case None{}:
+      0
+    case Some{pl}:
+      match pl:
+        case S.Plan{l, nrows, npiv, ntr, pivs, trs, tail}:
+          (pp_size(pivs, 0) + tr_size(trs, 0) + tc_size(tail, 0) : U32)
+
+def plan_of.go(pl: Maybe<&2, S.Plan>) -> S.Plan:
+  match pl:
+    case Some{x}:
+      x
+    case None{}:
+      S.Plan{0, 0, 0, 0, Nil{}, Nil{}, Nil{}}
+
+def apply_dbg(+d: U32, +plan: S.Plan, +rhs: List<&2, G.Vec>) -> Maybe<&2, List<&2, G.Vec>>:
+  Some{S.Solver.apply_par(d, plan, rhs)}
+
+# mode 9
+def timed_plan(+sp: T.SP, +tw: U32, +d: U32, +src: List<&2, G.Vec>) -> IO(Unit):
+  +rows = rows_of(sp, tw, src)
+  do IO<Unit>:
+    +t0 : Nat <- IO.now()
+    IO.print("rows built, terms: " ++ U32.show(nterms(rows, 0)))
+    +t1 : Nat <- IO.now()
+    +pl : Maybe<&2, S.Plan> <- IO.pure(Maybe<&2, S.Plan>, S.Solver.plan(R.L(sp), R.P(sp), rows))
+    IO.print("plan size: " ++ U32.show(plan_size(pl)))
+    +t2 : Nat <- IO.now()
+    IO.print("checksum of C: " ++ U32.show(msum(apply_dbg(d, plan_of.go(pl), S.rows_rhs(rows, Nil{})))))
+    +t3 : Nat <- IO.now()
+    IO.print("T=" ++ U32.show((4 * tw : U32)) ++ " octets, slices 2^" ++ U32.show(d) ++ ": rows ms=" ++ Nat.show((t1 - t0 : Nat)) ++ " plan ms=" ++ Nat.show((t2 - t1 - (t1 - t0) : Nat)) ++ " apply ms=" ++ Nat.show((t3 - t2 : Nat)))
+
+# mode 10: one plan, two payloads of different symbol sizes
+def reuse2(r2: List<&2, G.Vec>, +src2: List<&2, G.Vec>, +sp: T.SP) -> IO(Unit):
+  report(Some{r2}, src2, sp)
+
+def reuse1(+plan: S.Plan, +sp: T.SP, +tw: U32, +d: U32, +src: List<&2, G.Vec>) -> IO(Unit):
+  do IO<Unit>:
+    +t0 : Nat <- IO.now()
+    report(Some{S.Solver.apply_par(d, plan, S.rows_rhs(rows_of(sp, tw, src), Nil{}))}, src, sp)
+    +t1 : Nat <- IO.now()
+    IO.print("payload 1 (T=" ++ U32.show((4 * tw : U32)) ++ ") apply+verify ms=" ++ Nat.show((t1 - t0 : Nat)))
+    +src2 : List<&2, G.Vec> <- IO.pure(List<&2, G.Vec>, syms(List.length(&2, G.Vec, src), (2 * tw : U32), 12345, Nil{}))
+    +t2 : Nat <- IO.now()
+    reuse2(S.Solver.apply_par(d, plan, S.rows_rhs(rows_of(sp, (2 * tw : U32), src2), Nil{})), src2, sp)
+    +t3 : Nat <- IO.now()
+    IO.print("payload 2 (T=" ++ U32.show((8 * tw : U32)) ++ ") apply+verify ms=" ++ Nat.show((t3 - t2 : Nat)))
+
+def reuse(+sp: T.SP, +tw: U32, +d: U32, +src: List<&2, G.Vec>) -> IO(Unit):
+  reuse1(plan_of.go(S.Solver.plan(R.L(sp), R.P(sp), rows_of(sp, tw, src))), sp, tw, d, src)
+
 def go2(mode: U32, +sp: T.SP, +tw: U32, +d: U32, +src: List<&2, G.Vec>) -> IO(Unit):
   match mode:
     case 2:
@@ -182,6 +281,10 @@ def go2(mode: U32, +sp: T.SP, +tw: U32, +d: U32, +src: List<&2, G.Vec>) -> IO(Un
       timed(1, sp, tw, d, src)
     case 8:
       timed_auto(sp, tw, src)
+    case 9:
+      timed_plan(sp, tw, d, src)
+    case 10:
+      reuse(sp, tw, d, src)
     case _:
       report(solve(mode, sp, tw, d, src), src, sp)
 

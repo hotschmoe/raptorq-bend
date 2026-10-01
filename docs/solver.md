@@ -1,6 +1,6 @@
 # Solver (RFC 6330 section 5.4.2) -- `src/solver.bend`
 
-Public API (see `docs/interfaces.md`): `Solver.solve(l, rows)`, `Solver.solve_p(l, p, rows)` (p = number of permanently inactive
+Public API (see `docs/interfaces.md`; `plan`/`apply` below): `Solver.solve(l, rows)`, `Solver.solve_p(l, p, rows)` (p = number of permanently inactive
 trailing columns, `R.P(sp)` for RaptorQ), `Solver.solve_dense(l, rows)` (oracle), `Solver.inactive_count(l, p, rows)`
 (diagnostics). All return `Maybe<&2, List<&2, Sym>>`: `Some(C[0..l-1])` or `None` when rank < l. `rows : List<&2, Row>` (what
 `Constraints.*` produce). Added with the performance work (same answer as `solve_p`, opt-in parallelism, see `docs/perf.md`):
@@ -25,6 +25,14 @@ Tests (all exit non-zero on failure):
 * `bend tests/solver_bench.bend -o sb; ./sb [--threads N] -- <K> <mode> [<T octets> [<d>]]`: builds the K' system for random source
   symbols, solves it, and verifies C by re-encoding every source ISI (mode 0), or times the solve (mode 5; 6 = dense oracle,
   8 = `solve_auto`, 3 = tail size). Large cases: `./sb -- 56403 5 16` (15 s), `./sb --threads 12 -- 10000 5 1024 3`.
+
+## Plan / apply (RFC 5.4.2.2; details and numbers in `docs/plan_apply.md`)
+`Solver.plan(l, p, rows) -> Maybe<&2, Plan>` looks only at the coefficients of the rows (rhs ignored) and records pivot order,
+the elimination logs and the dense-tail solution as a matrix; `Solver.apply(plan, rhs: List<Sym>) -> List<Sym>` replays it on one
+rhs symbol per row (same order). `solve_p`, `solve`, `solve_par`, `solve_auto` are plan + apply (`solve_par` plans once and applies to
+2^d symbol slices concurrently; `apply_par(d, plan, rhs)`, `apply_auto(plan, rhs) : IO`); `solve_dense` is untouched. Tests:
+`solver_test` / `solver_golden_test` check apply(plan) against the known / RFC solutions and reuse one plan on two other payloads
+(T = 4 octets, and T doubled); `codec_plan_test` does the same on the golden codec vectors.
 
 ## Algorithm
 Dense baseline (`dg_*`, unchanged, also used for phase 2): rows are packed coefficient `Vec`s (4 octets per word, like symbols) + RHS
