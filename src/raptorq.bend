@@ -291,3 +291,44 @@ def dec.solve(m: Maybe<&2, T.SP>, enough: Bool, +k: U32, +t: U32, rv: List<&2, Y
 def Codec.decode(+k: U32, +t: U32, received: List<&2, Y.Rcv>) -> Maybe<&2, List<&2, G.Vec>>:
   +rv = received
   dec.solve(R.params(k), band(U32.is_ge(len_rcv(rv, 0), k), band(U32.is_gt(k, 0), U32.is_gt(t, 0))), k, t, rv)
+
+# ---------------------------------------------------------------------------
+# Auto-parallel IO variants (docs/perf.md section 4): the same answers as Codec.encoder / Codec.decode (bit for
+# bit), but the solve is Solver.solve_auto, which slices long symbols (>= 256 octets) over the available threads
+# (IO.thread_count, i.e. `--threads N` of a native binary).  For short symbols they are the same as the pure ones.
+# ---------------------------------------------------------------------------
+
+def enc.solve_auto(m: Maybe<&2, T.SP>, ok: Bool, +k: U32, +t: U32, source: List<&2, G.Vec>) -> IO(Maybe<&2, Enc>):
+  match m:
+    case None{}:
+      IO.pure(Maybe<&2, Enc>, None{})
+    case Some{+sp}:
+      match ok:
+        case False{}:
+          IO.pure(Maybe<&2, Enc>, None{})
+        case True{}:
+          do IO<Maybe<&2, Enc>>:
+            r : Maybe<&2, List<&2, G.Vec>> <- S.Solver.solve_auto(R.L(sp), R.P(sp), append_rows(C.fixed(sp, t), C.source_rows(sp, source)))
+            IO.pure(Maybe<&2, Enc>, enc.fin(r, k, t, sp))
+
+def Codec.encoder_auto(+k: U32, +t: U32, source: List<&2, G.Vec>) -> IO(Maybe<&2, Enc>):
+  +src = source
+  +ok = band(U32.is_eq(len_sym(src, 0), k), band(U32.is_gt(k, 0), U32.is_gt(t, 0)))
+  enc.solve_auto(R.params(k), ok, k, t, src)
+
+def dec.solve_auto(m: Maybe<&2, T.SP>, enough: Bool, +k: U32, +t: U32, rv: List<&2, Y.Rcv>) -> IO(Maybe<&2, List<&2, G.Vec>>):
+  match m:
+    case None{}:
+      IO.pure(Maybe<&2, List<&2, G.Vec>>, None{})
+    case Some{+sp}:
+      match enough:
+        case False{}:
+          IO.pure(Maybe<&2, List<&2, G.Vec>>, None{})
+        case True{}:
+          do IO<Maybe<&2, List<&2, G.Vec>>>:
+            r : Maybe<&2, List<&2, G.Vec>> <- S.Solver.solve_auto(R.L(sp), R.P(sp), append_rows(C.fixed(sp, t), C.received_rows(sp, k, rv)))
+            IO.pure(Maybe<&2, List<&2, G.Vec>>, dec.fin(r, k, sp))
+
+def Codec.decode_auto(+k: U32, +t: U32, received: List<&2, Y.Rcv>) -> IO(Maybe<&2, List<&2, G.Vec>>):
+  +rv = received
+  dec.solve_auto(R.params(k), band(U32.is_ge(len_rcv(rv, 0), k), band(U32.is_gt(k, 0), U32.is_gt(t, 0))), k, t, rv)

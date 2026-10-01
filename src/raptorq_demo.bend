@@ -1,7 +1,9 @@
 # RaptorQ demo and benchmark for src/raptorq.bend (docs/codec.md).
 #   bend src/raptorq_demo.bend                 encode a text, drop source symbols, decode from the rest, print it
 #   bend src/raptorq_demo.bend -- bench K M T  K source symbols of T octets (default T=16), M=0: encoder only (+20 repair
-#                                               symbols), M=1: also decode after losing 1/4 of the source symbols
+#                                               symbols), M=1: also decode after losing 1/4 of the source symbols,
+#                                               M=2 / M=3: like 0 / 1 with Codec.encoder_auto / decode_auto (symbols are
+#                                               sliced over the threads when T >= 256: ./demo --threads 12 -- bench 1000 3 1024)
 # Compiled: bend src/raptorq_demo.bend -o demo && ./demo -- bench 1000 1 16    (system clang first in PATH, see CLAUDE.md)
 import Base
 import ./gf256.bend as G
@@ -199,6 +201,36 @@ def bench.go(m: Maybe<&2, Q.Enc>, +mode: U32, +k: U32, +t: U32, src: List<&2, G.
         IO.print("encoder done; checksum of 20 repair symbols: " ++ U32.show(fold_syms(Q.Codec.symbols(e, k, 20), 0)))
         bench.mode(mode, e, k, t, src)
 
+# auto-parallel variants (Codec.encoder_auto / decode_auto): modes 2 (encode) and 3 (encode + decode)
+def auto.dec(res: Maybe<&2, List<&2, G.Vec>>, src: List<&2, G.Vec>) -> IO(Unit):
+  bench.dec(res, src)
+
+def auto.mode(+mode: U32, +e: Q.Enc, +k: U32, +t: U32, src: List<&2, G.Vec>) -> IO(Unit):
+  match mode:
+    case 2:
+      IO.pure(Unit, Unit{})
+    case _:
+      do IO<Unit>:
+        r : Maybe<&2, List<&2, G.Vec>> <- Q.Codec.decode_auto(k, t, received(e, k))
+        auto.dec(r, src)
+
+def auto.go(m: Maybe<&2, Q.Enc>, +mode: U32, +k: U32, +t: U32, src: List<&2, G.Vec>) -> IO(Unit):
+  match m:
+    case None{}:
+      IO.die(Unit, 1, "FAIL: encoder_auto returned None")
+    case Some{+e}:
+      do IO<Unit>:
+        IO.print("encoder_auto done; checksum of 20 repair symbols: " ++ U32.show(fold_syms(Q.Codec.symbols(e, k, 20), 0)))
+        auto.mode(mode, e, k, t, src)
+
+def bench.auto(+k: U32, +mode: U32, +t: U32) -> IO(Unit):
+  +data = bytes.go(U32.to_nat((k * t : U32)), (k * 65536 + t : U32), [])
+  +src = Q.Codec.split(data, t)
+  do IO<Unit>:
+    IO.print("bench (auto) K=" ++ U32.show(k) ++ " T=" ++ U32.show(t) ++ " mode=" ++ U32.show(mode))
+    m : Maybe<&2, Q.Enc> <- Q.Codec.encoder_auto(k, t, {src : List<&2, G.Vec>})
+    auto.go(m, mode, k, t, src)
+
 def bench(+k: U32, +mode: U32, +t: U32) -> IO(Unit):
   +data = bytes.go(U32.to_nat((k * t : U32)), (k * 65536 + t : U32), [])
   +src = Q.Codec.split(data, t)
@@ -206,15 +238,25 @@ def bench(+k: U32, +mode: U32, +t: U32) -> IO(Unit):
     IO.print("bench K=" ++ U32.show(k) ++ " T=" ++ U32.show(t) ++ " mode=" ++ U32.show(mode))
     bench.go(Q.Codec.encoder(k, t, {src : List<&2, G.Vec>}), mode, k, t, src)
 
+def sel2(b: Bool, +k: U32, +mode: U32, +t: U32) -> IO(Unit):
+  match b:
+    case True{}:
+      bench.auto(k, mode, t)
+    case False{}:
+      bench(k, mode, t)
+
+def bench.sel(+k: U32, +mode: U32, +t: U32) -> IO(Unit):
+  sel2(U32.is_ge(mode, 2), k, mode, t)
+
 def rd(s: String, d: U32) -> U32:
   Maybe.default(&2, U32, U32.read(s), d)
 
 def run_args(args: List<String>) -> IO(Unit):
   match args:
     case prog <> cmd <> ks <> ms <> ts <> rest:
-      bench(rd(ks, 10), rd(ms, 0), rd(ts, 16))
+      bench.sel(rd(ks, 10), rd(ms, 0), rd(ts, 16))
     case prog <> cmd <> ks <> ms <> Nil{}:
-      bench(rd(ks, 10), rd(ms, 0), 16)
+      bench.sel(rd(ks, 10), rd(ms, 0), 16)
     case _:
       demo()
 
