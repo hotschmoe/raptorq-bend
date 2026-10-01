@@ -3,15 +3,21 @@
 #   Solver.solve(l, rows)        -> Maybe<List<Sym>>   (inactivation decoding; default entry point)
 #   Solver.solve_p(l, p, rows)   -> same, with p = number of permanently inactive columns
 #                                   (the LAST p columns, RFC P = L - W); solve = solve_p(l, 0, ..)
+#   Solver.solve_par(l, p, d, rows) -> same answer, symbols sliced into 2^d parts solved concurrently
+#   Solver.solve_auto(l, p, rows)   -> IO: solve_par with d from IO.thread_count() and the symbol size
 #   Solver.solve_dense(l, rows)  -> same answer by plain Gauss-Jordan (test oracle)
+#   Solver.inactive_count(l, p, rows) -> size of the dense tail (diagnostics)
 #
-# See docs/solver.md for the design. Overview:
-#   phase 1  sparse rows are eliminated by min-weight pivoting; the other active columns of the
-#            chosen row are INACTIVATED (moved into a small "inactive" part of every row), so the
-#            active part never fills in.  Dense rows (HDPC-like) are kept as packed coefficient Vecs.
+# See docs/solver.md for the design and docs/perf.md for measurements. Overview:
+#   phase 1  min-weight pivoting on the small ACTIVE parts of the sparse rows, driven by a column -> rows index and
+#            weight buckets; the other active columns of the chosen row are INACTIVATED.  Rows only record a log of
+#            the eliminations they received; no symbol or inactive coefficient is touched.
+#   mat      inactive coefficient vectors and symbols of pivot / leftover rows are computed from the logs (pivot order),
+#            the dense (HDPC-like) rows are corrected for every pivot once.
 #   phase 2  the leftover rows over the inactive columns are solved by dense Gauss-Jordan.
-#   phase 3  every pivot row is back-substituted from the inactive solution (independent => parallel).
-# Every per-step pass over the rows is a divide-and-conquer map/reduce over a balanced tree (parallel).
+#   phase 3  the pivot columns are solved by forward substitution through their original sparse equations.
+# A fork reached from sequential code costs a whole runtime round (~0.3 ms), so everything here is sequential except
+# solve_par's top-level slice tasks and the (disabled, PAR() = 0) row passes of phase 2.
 import Base
 import ./gf256.bend as G
 import ./types.bend as T
