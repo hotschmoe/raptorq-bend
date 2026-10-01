@@ -804,10 +804,14 @@ def arr_push2(r: Array<List<&2, U32>> & List<&2, U32>, +w: U32, id: U32) -> Arra
 def arr_push(bk: Array<List<&2, U32>>, +w: U32, id: U32) -> Array<List<&2, U32>>:
   arr_push2(Array.swap(List<&2, U32>, bk, w, Nil{}), w, id)
 
+# weights >= 63 share the last bucket (a row with more than 63 active columns is only picked when nothing lighter is left)
+def bkt(+w: U32) -> U32:
+  U32.min(w, 63)
+
 def bk_push_if(go: Bool, bk: Array<List<&2, U32>>, w: U32, id: U32) -> Array<List<&2, U32>>:
   match go:
     case True{}:
-      arr_push(bk, w, id)
+      arr_push(bk, bkt(w), id)
     case False{}:
       bk
 
@@ -921,7 +925,7 @@ def st4(valid: Bool, rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, 
 def st3(rows: Array<Rw>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: Pl, +w: U32, +id: U32, bk: Array<List<&2, U32>>, r: Array<U32> & U32) -> P1:
   match r:
     case Tuple{wt, cw}:
-      st4(U32.is_eq(cw, w), rows, wt, bk, ci, dn, pivs, id)
+      st4(U32.is_eq(bkt(cw), w), rows, wt, bk, ci, dn, pivs, id)
 
 def st2(rows: Array<Rw>, wt: Array<U32>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: Pl, +w: U32, r: Array<List<&2, U32>> & List<&2, U32>) -> P1:
   match r:

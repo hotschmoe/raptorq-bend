@@ -145,6 +145,16 @@ def main():
     rows[0] = rows[0] + [(rows[0][0][0], rows[0][0][1])] + [(rows[0][0][0], 7), (rows[0][0][0], 7), (0, 0)]
     add(30, 5, rows, 1, "sparse duplicate terms") if True else None
 
+    # wide sparse rows: more than 63 terms (the weight-bucket cap of the solver) but still treated as sparse
+    # (4 * terms <= l); every row also has 3 permanent (PI-like) terms
+    l, p, terms, ex = 300, 12, 70, 4
+    while True:
+        rows = [[(c, rng.randrange(1, 256)) for c in rng.sample(range(l - p), terms)]
+                + [(c, rng.randrange(1, 256)) for c in rng.sample(range(l - p, l), 3)] for _ in range(l + ex)]
+        if rank(l, rows) == l:
+            break
+    add(l, p, rows, 1, "wide sparse (70 terms)")
+
     flat = [len(systems)]
     for s in systems:
         flat += s
