@@ -8,6 +8,9 @@
 #   Codec.symbol(enc, esi) / repair    encoding symbol for ESI (ESI < K is the source symbol)
 #   Codec.symbols(enc, esi0, n)        n consecutive encoding symbols
 #   Codec.decode(k, t, received)       Maybe<List<Sym>>: the K source symbols
+#   Codec.plan_for(k, esis)            Maybe<Plan>: the symbol-independent part of the solve for these received ESIs
+#   Codec.encoder_plan(k)              plan_for(k, 0..k-1): the encoder's plan, reusable for every source block of this K
+#   Codec.encode_with_plan(k, t, plan, source) / Codec.decode_with_plan(k, t, plan, syms)   (+ _auto IO variants)
 import Base
 import ./gf256.bend as G
 import ./types.bend as Y
@@ -332,3 +335,159 @@ def dec.solve_auto(m: Maybe<&2, T.SP>, enough: Bool, +k: U32, +t: U32, rv: List<
 def Codec.decode_auto(+k: U32, +t: U32, received: List<&2, Y.Rcv>) -> IO(Maybe<&2, List<&2, G.Vec>>):
   +rv = received
   dec.solve_auto(R.params(k), band(U32.is_ge(len_rcv(rv, 0), k), band(U32.is_gt(k, 0), U32.is_gt(t, 0))), k, t, rv)
+
+# ---------------------------------------------------------------------------
+# Plans (docs/plan_apply.md): RFC 5.4.2.2 separation of the symbol-independent part of the solve (pivot order,
+# elimination log, dense tail solution) from the symbols.  The plan depends only on K and WHICH ESIs are received (in
+# which order), not on T or the data: for the encoder (all K source symbols "received") it is computed once per K and reused
+# for every source block / symbol size; for the decoder it is computed once per loss pattern.
+# ---------------------------------------------------------------------------
+
+def rcv_rev(es: List<&2, U32>, acc: List<&2, Y.Rcv>) -> List<&2, Y.Rcv>:
+  match es:
+    case Nil{}:
+      acc
+    case Con{e, tl}:
+      rcv_rev(tl, Y.Rcv{e, G.VNil{}} <> acc)
+
+def plan.go(m: Maybe<&2, T.SP>, ok: Bool, +k: U32, es: List<&2, U32>) -> Maybe<&2, S.Plan>:
+  match m:
+    case None{}:
+      None{}
+    case Some{+sp}:
+      match ok:
+        case False{}:
+          None{}
+        case True{}:
+          S.Solver.plan(R.L(sp), R.P(sp), append_rows(C.fixed(sp, 0), C.received_rows(sp, k, rcv_rev(es, []))))
+
+# The plan for a decoder that receives the symbols with these ESIs (in this order; K <= len(esis)).  The rows of the system
+# are the S+H constraint rows, one row per received symbol (in the order given) and the K'-K padding rows.  None if
+# fewer than K ESIs are given, K is invalid, or the system is rank deficient (RFC 5.4.2 decoding failure).
+def Codec.plan_for(+k: U32, esis: List<&2, U32>) -> Maybe<&2, S.Plan>:
+  +es = esis
+  plan.go(R.params(k), band(U32.is_ge(len_u32(es, 0), k), U32.is_gt(k, 0)), k, es)
+
+def esi_seq(n: Nat, +i: U32, acc: List<&2, U32>) -> List<&2, U32>:
+  match n:
+    case 0n:
+      acc
+    case 1n+p:
+      esi_seq(p, (i - 1 : U32), i <> acc)
+
+# The encoder's plan: the systematic symbols ESI 0..K-1 "received" (RFC 5.3.3.4).  Reusable for every source block with this K
+# and any T.
+def Codec.encoder_plan(+k: U32) -> Maybe<&2, S.Plan>:
+  Codec.plan_for(k, esi_seq(U32.to_nat(k), (k - 1 : U32), []))
+
+def zeros_rep(n: Nat, +z: G.Vec, acc: List<&2, G.Vec>) -> List<&2, G.Vec>:
+  match n:
+    case 0n:
+      acc
+    case 1n+p:
+      zeros_rep(p, z, z <> acc)
+
+def append_syms(xs: List<&2, G.Vec>, ys: List<&2, G.Vec>) -> List<&2, G.Vec>:
+  List.reverse.go(&2, G.Vec, List.reverse(&2, G.Vec, xs), ys)
+
+# rhs symbols of the plan's rows: S+H zero symbols, the received symbols, K'-K zero symbols
+def wp.rhs(+sp: T.SP, +k: U32, +t: U32, syms: List<&2, G.Vec>) -> List<&2, G.Vec>:
+  +z = C.zero(t)
+  append_syms(zeros_rep(U32.to_nat((R.S(sp) + R.H(sp) : U32)), z, []), append_syms(syms, zeros_rep(U32.to_nat((R.Kp(sp) - k : U32)), z, [])))
+
+# the plan must belong to this K (columns) and to as many rows as the symbols make
+def wp.ok(+plan: S.Plan, +rhs: List<&2, G.Vec>, +l: U32) -> Bool:
+  band(U32.is_eq(len_sym(rhs, 0), S.Solver.plan_rows(plan)), U32.is_eq(S.Solver.plan_cols(plan), l))
+
+def wp.fin(ok: Bool, plan: S.Plan, rhs: List<&2, G.Vec>) -> Maybe<&2, List<&2, G.Vec>>:
+  match ok:
+    case True{}:
+      Some{S.Solver.apply(plan, rhs)}
+    case False{}:
+      None{}
+
+# the L intermediate symbols from a plan and the received symbols (same order as the ESIs given to plan_for)
+def wp.inter(+sp: T.SP, +k: U32, +t: U32, +plan: S.Plan, syms: List<&2, G.Vec>) -> Maybe<&2, List<&2, G.Vec>>:
+  +rhs = wp.rhs(sp, k, t, syms)
+  wp.fin(wp.ok(plan, rhs, R.L(sp)), plan, rhs)
+
+def ewp.go(m: Maybe<&2, T.SP>, tok: Bool, +k: U32, +t: U32, plan: S.Plan, source: List<&2, G.Vec>) -> Maybe<&2, Enc>:
+  match m:
+    case None{}:
+      None{}
+    case Some{+sp}:
+      match tok:
+        case False{}:
+          None{}
+        case True{}:
+          enc.fin(wp.inter(sp, k, t, plan, source), k, t, sp)
+
+# Codec.encoder with a plan from Codec.encoder_plan(k): only the symbol side of the solve is run.  None if the plan does
+# not fit (wrong K or rows), the number of source symbols is not K, or T = 0.  Bit for bit the same as Codec.encoder.
+def Codec.encode_with_plan(+k: U32, +t: U32, plan: S.Plan, source: List<&2, G.Vec>) -> Maybe<&2, Enc>:
+  +src = source
+  ewp.go(R.params(k), band(U32.is_eq(len_sym(src, 0), k), U32.is_gt(t, 0)), k, t, plan, src)
+
+def dwp.go(m: Maybe<&2, T.SP>, tok: Bool, +k: U32, +t: U32, plan: S.Plan, syms: List<&2, G.Vec>) -> Maybe<&2, List<&2, G.Vec>>:
+  match m:
+    case None{}:
+      None{}
+    case Some{+sp}:
+      match tok:
+        case False{}:
+          None{}
+        case True{}:
+          dec.fin(wp.inter(sp, k, t, plan, syms), k, sp)
+
+# Codec.decode with a plan from Codec.plan_for(k, esis): `syms` are the received symbols' data in the SAME order as `esis`.
+# Returns the K source symbols (re-encoded from the intermediate symbols, like Codec.decode).  None if the plan does not fit
+# or T = 0.
+def Codec.decode_with_plan(+k: U32, +t: U32, plan: S.Plan, syms: List<&2, G.Vec>) -> Maybe<&2, List<&2, G.Vec>>:
+  dwp.go(R.params(k), U32.is_gt(t, 0), k, t, plan, syms)
+
+# ---- IO variants: Solver.apply_auto (symbol slicing over IO.thread_count for symbols >= 256 octets) ------------------
+def wp.fin_auto(ok: Bool, plan: S.Plan, rhs: List<&2, G.Vec>) -> IO(Maybe<&2, List<&2, G.Vec>>):
+  match ok:
+    case True{}:
+      do IO<Maybe<&2, List<&2, G.Vec>>>:
+        r : List<&2, G.Vec> <- S.Solver.apply_auto(plan, rhs)
+        IO.pure(Maybe<&2, List<&2, G.Vec>>, Some{r})
+    case False{}:
+      IO.pure(Maybe<&2, List<&2, G.Vec>>, None{})
+
+def wp.inter_auto(+sp: T.SP, +k: U32, +t: U32, +plan: S.Plan, syms: List<&2, G.Vec>) -> IO(Maybe<&2, List<&2, G.Vec>>):
+  +rhs = wp.rhs(sp, k, t, syms)
+  wp.fin_auto(wp.ok(plan, rhs, R.L(sp)), plan, rhs)
+
+def ewp.go_auto(m: Maybe<&2, T.SP>, tok: Bool, +k: U32, +t: U32, plan: S.Plan, source: List<&2, G.Vec>) -> IO(Maybe<&2, Enc>):
+  match m:
+    case None{}:
+      IO.pure(Maybe<&2, Enc>, None{})
+    case Some{+sp}:
+      match tok:
+        case False{}:
+          IO.pure(Maybe<&2, Enc>, None{})
+        case True{}:
+          do IO<Maybe<&2, Enc>>:
+            r : Maybe<&2, List<&2, G.Vec>> <- wp.inter_auto(sp, k, t, plan, source)
+            IO.pure(Maybe<&2, Enc>, enc.fin(r, k, t, sp))
+
+def Codec.encode_with_plan_auto(+k: U32, +t: U32, plan: S.Plan, source: List<&2, G.Vec>) -> IO(Maybe<&2, Enc>):
+  +src = source
+  ewp.go_auto(R.params(k), band(U32.is_eq(len_sym(src, 0), k), U32.is_gt(t, 0)), k, t, plan, src)
+
+def dwp.go_auto(m: Maybe<&2, T.SP>, tok: Bool, +k: U32, +t: U32, plan: S.Plan, syms: List<&2, G.Vec>) -> IO(Maybe<&2, List<&2, G.Vec>>):
+  match m:
+    case None{}:
+      IO.pure(Maybe<&2, List<&2, G.Vec>>, None{})
+    case Some{+sp}:
+      match tok:
+        case False{}:
+          IO.pure(Maybe<&2, List<&2, G.Vec>>, None{})
+        case True{}:
+          do IO<Maybe<&2, List<&2, G.Vec>>>:
+            r : Maybe<&2, List<&2, G.Vec>> <- wp.inter_auto(sp, k, t, plan, syms)
+            IO.pure(Maybe<&2, List<&2, G.Vec>>, dec.fin(r, k, sp))
+
+def Codec.decode_with_plan_auto(+k: U32, +t: U32, plan: S.Plan, syms: List<&2, G.Vec>) -> IO(Maybe<&2, List<&2, G.Vec>>):
+  dwp.go_auto(R.params(k), U32.is_gt(t, 0), k, t, plan, syms)

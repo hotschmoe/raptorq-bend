@@ -33,6 +33,11 @@ detected (extra rows reducing to `0 = nonzero` are ignored).
   independent top-level tasks (d is capped by the symbol size; d = 0 is `solve_p`). Pays off for T >= 256 octets.
 - `Solver.solve_auto(l: U32, p: U32, rows) -> IO(Maybe<&2, List<&2, G.Vec>>)`: `solve_par` with d = 0 below 256 octets,
   else `min(3, log2(IO.thread_count()))`. Needs an IO context (native binary: `./prog --threads N`).
+- `Solver.plan(l, p, rows) -> Maybe<&2, Plan>`: symbol-independent part (rhs of the rows ignored, pass `G.VNil{}`), `None` if rank < l.
+  `Plan` is Data (lists only; reusable, duplicable). `Solver.plan_rows(plan)` = number of rhs symbols, `Solver.plan_cols(plan)` = l.
+- `Solver.apply(plan, rhs: List<&2, G.Vec>) -> List<&2, G.Vec>`: C[0..l-1]; `rhs` = exactly `plan_rows` symbols of one common length,
+  one per row in the order the plan was made from. `Solver.apply_par(d, plan, rhs)` (2^d symbol slices in parallel),
+  `Solver.apply_auto(plan, rhs) -> IO(List<G.Vec>)` (d from threads/symbol size). solve/solve_p/solve_par/solve_auto = plan + apply.
 - `Solver.solve_dense(l, rows)`: plain Gauss-Jordan oracle (slow, for tests); `Solver.inactive_count(l, p, rows) -> U32`: size
   of the dense tail (diagnostics).
 
@@ -47,6 +52,11 @@ Single source block, 1 <= K <= 56403. `Enc{k, t, sp, tr}` holds the parameters a
 - `Codec.decode(k, t, received: List<&2, Y.Rcv>) -> Maybe<&2, List<&2, G.Vec>>`: the K source symbols; `None` if fewer than K
   symbols, invalid K/T, or rank deficient
 - `Codec.decode_auto(k, t, received) -> IO(Maybe<&2, List<&2, G.Vec>>)`: same result, solver = `Solver.solve_auto`
+
+- Plans: `Codec.plan_for(k, esis) -> Maybe<&2, Plan>` (decoder, ESIs in the order the symbols will be given; `None` if < K or rank
+  deficient), `Codec.encoder_plan(k)` (= plan_for(k, 0..k-1)), `Codec.encode_with_plan(k, t, plan, source) -> Maybe<&2, Enc>`,
+  `Codec.decode_with_plan(k, t, plan, syms) -> Maybe<&2, List<G.Vec>>` (+ `encode_with_plan_auto`, `decode_with_plan_auto` in IO).
+  A plan does not depend on T or the data; `None` when the plan does not fit K / the symbol count or T = 0.
 
 ## Tests
 Python generators in `tools/` emit Bend fixture files from `tests/vectors/*.txt`. `bend tests/<x>_test.bend` exits non-zero on
