@@ -271,8 +271,36 @@ def symbols.size(+enc: Enc) -> U32:
     case Enc{k, t, +sp, tr}:
       R.L(sp)
 
+def symbols.words(+enc: Enc) -> U32:
+  match enc:
+    case Enc{k, t, sp, +tr}:
+      F.Flat.words_of_tree(tr)
+
 def Codec.symbols(+enc: Enc, +esi0: U32, +n: U32) -> List<&2, G.Vec>:
   symbols.pick(U32.is_ge((n * 40 : U32), symbols.size(enc)), enc, esi0, n)
+
+# The same n symbols with the work cut into 2^d word slices computed in ONE parallel region (src/flat.bend, docs/scaling.md): each task
+# copies its slice of the intermediate symbols into its own arena, XORs, reads out; d = 0 or few symbols: Codec.symbols.
+def symbols.par2(+big: Bool, +d: U32, +enc: Enc, +esi0: U32, +n: U32) -> List<&2, G.Vec>:
+  match big:
+    case True{}:
+      match enc:
+        case Enc{+k, t, +sp, +tr}:
+          F.Flat.encode_tree_par(d, sp, k, tr, esi0, n)
+    case False{}:
+      Codec.symbols(enc, esi0, n)
+
+def Codec.symbols_par(+enc: Enc, +d: U32, +esi0: U32, +n: U32) -> List<&2, G.Vec>:
+  symbols.par2(U32.is_ge((n * 40 : U32), symbols.size(enc)), d, enc, esi0, n)
+
+# slicing depth from the thread count (IO.thread_count) and the amount of work, then Codec.symbols_par
+def symbols.auto2(+t: U32, +enc: Enc, +esi0: U32, +n: U32) -> List<&2, G.Vec>:
+  Codec.symbols_par(enc, S.Solver.auto_depth_syms(t, symbols.words(enc), n), esi0, n)
+
+def Codec.symbols_auto(+enc: Enc, +esi0: U32, +n: U32) -> IO(List<&2, G.Vec>):
+  do IO<List<&2, G.Vec>>:
+    t : U32 <- IO.thread_count()
+    IO.pure(List<&2, G.Vec>, symbols.auto2(t, enc, esi0, n))
 
 # ---------------------------------------------------------------------------
 # Decoder
@@ -293,6 +321,41 @@ def dec.arena(pl: Maybe<&2, S.Plan>, rhs: List<&2, G.Vec>, +k: U32, +sp: T.SP) -
       None{}
     case Some{plan}:
       Some{F.Flat.encode_arena(sp, k, S.Solver.apply_arena(plan, rhs), 0, k)}
+
+# sliced decode (d > 0): ONE fork tree over word slices; each task replays the (cloned) program on its slice of the rhs symbols and
+# re-encodes its slice of the K source symbols from its arena; the slices are joined per symbol (docs/scaling.md)
+def dec.leaf(+m: S.Pm, p: Array<U32>, +sp: T.SP, +k: U32, rs: List<&2, G.Vec>) -> List<&2, G.Vec>:
+  F.Flat.encode_arena(sp, k, S.Solver.apply_prog(m, p, rs), 0, k)
+
+def dec.tree(+kk: Nat, +d: Nat, +idx: U32, +m: S.Pm, r: Array<U32> & Array<U32>, +sp: T.SP, +k: U32, +rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
+  match kk:
+    case 0n:
+      (p, p2) = r
+      dec.leaf(m, p, sp, k, S.slice_syms(rhs, d, idx))
+    case 1n+q:
+      (p1, p2) = r
+      a b = dec.tree(q, d, (idx * 2 : U32), m, Array.clone(U32, p1), sp, k, rhs) dec.tree(q, d, (idx * 2 + 1 : U32), m, Array.clone(U32, p2), sp, k, rhs)
+      F.Flat.vjoin(a, b)
+
+def dec.par(+dd: Nat, pg: S.Pg, +sp: T.SP, +k: U32, +rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
+  match pg:
+    case S.Pg{p, m}:
+      dec.tree(dd, dd, 0, m, Array.clone(U32, p), sp, k, rhs)
+
+def dec.arena_dd(+dd: Nat, plan: S.Plan, rs: List<&2, G.Vec>, +k: U32, +sp: T.SP) -> List<&2, G.Vec>:
+  match dd:
+    case 0n:
+      F.Flat.encode_arena(sp, k, S.Solver.apply_arena(plan, rs), 0, k)
+    case _:
+      dec.par(dd, S.Solver.prog(plan), sp, k, rs)
+
+def dec.arena_d(pl: Maybe<&2, S.Plan>, +d: U32, rhs: List<&2, G.Vec>, +k: U32, +sp: T.SP) -> Maybe<&2, List<&2, G.Vec>>:
+  match pl:
+    case None{}:
+      None{}
+    case Some{plan}:
+      +rs = rhs
+      Some{dec.arena_dd(S.cap(U32.to_nat(d), S.sw_log(S.rhs_sw(rs))), plan, rs, k, sp)}
 
 def dec.solve(m: Maybe<&2, T.SP>, enough: Bool, +k: U32, +t: U32, rv: List<&2, Y.Rcv>) -> Maybe<&2, List<&2, G.Vec>>:
   match m:
@@ -346,7 +409,8 @@ def dec.auto_go(d: U32, +sp: T.SP, +k: U32, rows: List<&2, Y.Row>) -> Maybe<&2, 
       +rs = rows
       dec.arena(S.Solver.plan(R.L(sp), R.P(sp), rs), S.rows_rhs(rs, Nil{}), k, sp)
     case _:
-      dec.fin(S.Solver.solve_par(R.L(sp), R.P(sp), d, rows), k, sp)
+      +rs = rows
+      dec.arena_d(S.Solver.plan(R.L(sp), R.P(sp), rs), d, S.rows_rhs(rs, Nil{}), k, sp)
 
 def dec.solve_auto(m: Maybe<&2, T.SP>, enough: Bool, +k: U32, +t: U32, rv: List<&2, Y.Rcv>) -> IO(Maybe<&2, List<&2, G.Vec>>):
   match m:
@@ -523,7 +587,7 @@ def dwp.auto2(ok: Bool, +d: U32, plan: S.Plan, rhs: List<&2, G.Vec>, +k: U32, +s
         case 0:
           dec.arena(Some{plan}, rhs, k, sp)
         case _:
-          dec.fin(Some{S.Solver.apply_par(d, plan, rhs)}, k, sp)
+          dec.arena_d(Some{plan}, d, rhs, k, sp)
 
 def dwp.auto1(+sp: T.SP, +k: U32, +t: U32, +plan: S.Plan, syms: List<&2, G.Vec>) -> IO(Maybe<&2, List<&2, G.Vec>>):
   +rhs = wp.rhs(sp, k, t, syms)

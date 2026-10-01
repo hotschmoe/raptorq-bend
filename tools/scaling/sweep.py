@@ -12,7 +12,7 @@ PIN1 = os.environ.get('PIN1', '10')
 def run(args, th):
     best, chk = None, None
     for _ in range(reps):
-        cmd = [binary, '--threads', str(th), '--'] + args.split()
+        cmd = [binary] + os.environ.get('RTFLAGS', '').split() + ['--threads', str(th), '--'] + args.split()
         if th == 1:
             cmd = ['taskset', '-c', PIN1] + cmd
         elif th <= 8:

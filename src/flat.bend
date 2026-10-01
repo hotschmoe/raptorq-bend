@@ -586,3 +586,71 @@ def Flat.enc_list.go(+sp: T.SP, +k: U32, inter: List<&2, G.Vec>, +esi0: U32, +n:
 def Flat.encode_list(+sp: T.SP, +k: U32, inter: List<&2, G.Vec>, +esi0: U32, +n: U32) -> List<&2, G.Vec>:
   +ys = inter
   Flat.enc_list.go(sp, k, ys, esi0, n, Flat.words(Flat.first_of_list(ys)))
+
+# ---------------------------------------------------------------------------
+# Word slices of symbols (sliced = parallel apply / encode: docs/scaling.md).  A symbol is cut into 2^d word ranges = the subtrees
+# at depth d of its balanced Vec (no copying); vjoin glues the slice lists back (VNode{x, y} of the halves is the shape Vec.from_list builds).
+# ---------------------------------------------------------------------------
+def Flat.pick_v(left: Bool, l: G.Vec, r: G.Vec) -> G.Vec:
+  match left:
+    case True{}:
+      l
+    case False{}:
+      r
+
+# the idx-th of the 2^d subtrees at depth d (idx has d bits, most significant bit = first split)
+def Flat.vsub(+d: Nat, +idx: U32, v: G.Vec) -> G.Vec:
+  match d:
+    case 0n:
+      v
+    case 1n+q:
+      match v:
+        case G.VNode{l, r}:
+          Flat.vsub(q, U32.and(idx, (U32.shln(1, q) - 1 : U32)), Flat.pick_v(U32.is_eq(U32.and(U32.shrn(idx, q), 1), 0), l, r))
+        case G.VWord{w}:
+          G.VWord{w}
+        case G.VNil{}:
+          G.VNil{}
+
+def Flat.vjoin(a: List<&2, G.Vec>, b: List<&2, G.Vec>) -> List<&2, G.Vec>:
+  match a b:
+    case x <> xs y <> ys:
+      G.VNode{x, y} <> Flat.vjoin(xs, ys)
+    case _ _:
+      Nil{}
+
+
+# ---- parallel encoding symbols: ONE fork tree over word slices; every leaf copies ITS slice of the intermediate symbols into its
+# own arena, generates the n symbols' slices, reads them out; the slices are joined per symbol.  Same symbols as Flat.encode_tree.
+def Flat.tfill_s(tr: C.ITree, +d: Nat, +idx: U32, +wu: U32, f: Fi) -> Fi:
+  match tr:
+    case C.INil{}:
+      f
+    case C.ILeaf{v}:
+      Flat.fill1(Flat.vsub(d, idx, v), wu, f)
+    case C.INode{_, l, r}:
+      Flat.tfill_s(r, d, idx, wu, Flat.tfill_s(l, d, idx, wu, f))
+
+def Flat.ets.leaf(+sp: T.SP, +k: U32, +tr: C.ITree, +esi0: U32, +n: U32, +d: Nat, +idx: U32) -> List<&2, G.Vec>:
+  +wu = Flat.words(Flat.vsub(d, idx, Flat.itree_first(tr)))
+  Flat.run(n, esi0, k, sp, wu, Flat.tfill_s(tr, d, idx, wu, Flat.arena(R.L(sp), wu)))
+
+def Flat.ets.tree(+kk: Nat, +d: Nat, +idx: U32, +sp: T.SP, +k: U32, +tr: C.ITree, +esi0: U32, +n: U32) -> List<&2, G.Vec>:
+  match kk:
+    case 0n:
+      Flat.ets.leaf(sp, k, tr, esi0, n, d, idx)
+    case 1n+q:
+      a b = Flat.ets.tree(q, d, (idx * 2 : U32), sp, k, tr, esi0, n) Flat.ets.tree(q, d, (idx * 2 + 1 : U32), sp, k, tr, esi0, n)
+      Flat.vjoin(a, b)
+
+# d fork levels, capped at log2(words per symbol)
+def Flat.dcap(+d: U32, +wu: U32) -> Nat:
+  match wu:
+    case 0:
+      0n
+    case _:
+      U32.to_nat(U32.min(d, U32.from_nat(U32.log2(wu))))
+
+def Flat.encode_tree_par(+d: U32, +sp: T.SP, +k: U32, +tr: C.ITree, +esi0: U32, +n: U32) -> List<&2, G.Vec>:
+  +dd = Flat.dcap(d, Flat.words_of_tree(tr))
+  Flat.ets.tree(dd, dd, 0, sp, k, tr, esi0, n)

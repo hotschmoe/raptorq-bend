@@ -1882,40 +1882,12 @@ def Solver.solve(l: U32, rows: List<&2, T.Row>) -> Maybe<&2, List<&2, G.Vec>>:
 # exactly the shape Vec.from_list builds).  The plan is computed once and shared, so only the symbol work is
 # divided; this pays when symbols are long and threads are available; see docs/perf.md.  d = 0 is Solver.apply.
 # ---------------------------------------------------------------------------
-def pick_v(left: Bool, l: G.Vec, r: G.Vec) -> G.Vec:
-  match left:
-    case True{}:
-      l
-    case False{}:
-      r
-
-# the idx-th of the 2^d subtrees at depth d (idx has d bits, most significant bit = first split)
-def vsub(+d: Nat, +idx: U32, v: G.Vec) -> G.Vec:
-  match d:
-    case 0n:
-      v
-    case 1n+q:
-      match v:
-        case G.VNode{l, r}:
-          vsub(q, U32.and(idx, (U32.shln(1, q) - 1 : U32)), pick_v(U32.is_eq(U32.and(U32.shrn(idx, q), 1), 0), l, r))
-        case G.VWord{w}:
-          G.VWord{w}
-        case G.VNil{}:
-          G.VNil{}
-
 def slice_syms(rs: List<&2, G.Vec>, +d: Nat, +idx: U32) -> List<&2, G.Vec>:
   match rs:
     case Nil{}:
       Nil{}
     case h <> t:
-      vsub(d, idx, h) <> slice_syms(t, d, idx)
-
-def vjoin(a: List<&2, G.Vec>, b: List<&2, G.Vec>) -> List<&2, G.Vec>:
-  match a b:
-    case x <> xs y <> ys:
-      G.VNode{x, y} <> vjoin(xs, ys)
-    case _ _:
-      Nil{}
+      F.Flat.vsub(d, idx, h) <> slice_syms(t, d, idx)
 
 # A leaf of the sliced apply: its word slice of every rhs symbol, the program run on its own arena, the solution slices read out
 def pa.leaf(+m: Pm, p: Array<U32>, rs: List<&2, G.Vec>) -> List<&2, G.Vec>:
@@ -1933,7 +1905,7 @@ def pa.tree(+k: Nat, +d: Nat, +idx: U32, +m: Pm, r: Array<U32> & Array<U32>, +rh
     case 1n+q:
       (p1, p2) = r
       a b = pa.tree(q, d, (idx * 2 : U32), m, Array.clone(U32, p1), rhs) pa.tree(q, d, (idx * 2 + 1 : U32), m, Array.clone(U32, p2), rhs)
-      vjoin(a, b)
+      F.Flat.vjoin(a, b)
 
 def pa.run(+dd: Nat, pg: Pg, +rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
   match pg:
@@ -1976,7 +1948,7 @@ def Solver.solve_par(+l: U32, +p: U32, +d: U32, +rows: List<&2, T.Row>) -> Maybe
 # 4 ns per word, so a slice pays back its fork rounds, per-slice table and read-out only for very large blocks:
 # measured on 12 threads, K = 1000..4000 T = 1024 (0.3-1M words) slicing is 1.0-1.5x SLOWER, K = 10000 T = 1024 (2.7M words) +-0.
 def AUTO_MIN_WORDS() -> U32:
-  8388608
+  262144
 
 def auto_d.go(small: Bool, +t: U32) -> U32:
   match small:
@@ -1987,6 +1959,11 @@ def auto_d.go(small: Bool, +t: U32) -> U32:
 
 def Solver.auto_depth(+t: U32, +sw: U32, +nrows: U32) -> U32:
   auto_d.go(Bool.or(U32.is_lt(sw, 64), U32.is_lt((nrows * sw : U32), AUTO_MIN_WORDS())), t)
+
+# slicing depth for generating n encoding symbols of sw words (copy-in of the intermediate symbols, XORs and read-out all run inside
+# the tasks): nothing below 2^15 words of output or 16 words per symbol
+def Solver.auto_depth_syms(+t: U32, +sw: U32, +n: U32) -> U32:
+  auto_d.go(Bool.or(U32.is_lt(sw, 16), U32.is_lt((n * sw : U32), 32768)), t)
 
 def apply_auto2(t: U32, +plan: Plan, +rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
   Solver.apply_par(Solver.auto_depth(t, rhs_sw(rhs), Solver.plan_rows(plan)), plan, rhs)

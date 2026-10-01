@@ -1,7 +1,9 @@
 # Codec benchmark (docs/benchmarks.md): encoder setup (intermediate symbols), N repair symbols, decode from K symbols.
 #   bend tools/bench/bench.bend -o build/bench     (put /usr/bin first in PATH, see CLAUDE.md)
 #   ./build/bench [--threads N] -- <K> <T octets> <N repair symbols>
-# Prints one line:  BEND K=.. T=.. N=.. threads=.. setup_ms=.. repair_ms=.. decode_ms=.. ok=1
+# Prints one line:  BEND K=.. T=.. N=.. threads=.. setup_ms=.. repair_ms=.. repair_walk_ms=.. decode_ms=.. ok=1
+# repair_ms = Codec.symbols_auto call (strict: forcing the list spine forces the symbols), repair_walk_ms = the harness checksum walk afterwards (NOT in repair_ms);
+# decode_ms = Codec.decode_auto call only, the verification against the source is outside the clock.
 # The decode input is K symbols: every 8th ESI is a source symbol, the rest are repair symbols (ESI >= K).
 # Uses Codec.encoder_auto / decode_auto (slicing over the threads for T >= 256).  Always an IO main (native binary).
 import Base
@@ -96,19 +98,34 @@ def verdict(res: Maybe<&2, List<&2, G.Vec>>, src: List<&2, G.Vec>) -> U32:
     case Some{out}:
       b2u(syms_eq(out, src))
 
-def report(+k: U32, +t: U32, +n: U32, +thr: U32, +setup: Nat, +rep: Nat, +dec: Nat, +ok: U32) -> IO(Unit):
-  IO.print("BEND K=" ++ U32.show(k) ++ " T=" ++ U32.show(t) ++ " N=" ++ U32.show(n) ++ " threads=" ++ U32.show(thr) ++ " setup_ms=" ++ Nat.show(setup) ++ " repair_ms=" ++ Nat.show(rep) ++ " decode_ms=" ++ Nat.show(dec) ++ " ok=" ++ U32.show(ok))
+def report(+k: U32, +t: U32, +n: U32, +thr: U32, +setup: Nat, +rep: Nat, +repw: Nat, +dec: Nat, +ok: U32) -> IO(Unit):
+  IO.print("BEND K=" ++ U32.show(k) ++ " T=" ++ U32.show(t) ++ " N=" ++ U32.show(n) ++ " threads=" ++ U32.show(thr) ++ " setup_ms=" ++ Nat.show(setup) ++ " repair_ms=" ++ Nat.show(rep) ++ " repair_walk_ms=" ++ Nat.show(repw) ++ " decode_ms=" ++ Nat.show(dec) ++ " ok=" ++ U32.show(ok))
 
-def decode_phase(+e: Q.Enc, +k: U32, +t: U32, +n: U32, +thr: U32, +setup: Nat, +rep: Nat, src: List<&2, G.Vec>) -> IO(Unit):
+def len_syms(xs: List<&2, G.Vec>, +acc: U32) -> U32:
+  match xs:
+    case Nil{}:
+      acc
+    case Con{h, t}:
+      len_syms(t, (acc + 1 : U32))
+
+def len_res(r: Maybe<&2, List<&2, G.Vec>>) -> U32:
+  match r:
+    case None{}:
+      0
+    case Some{xs}:
+      len_syms(xs, 0)
+
+def decode_phase(+e: Q.Enc, +k: U32, +t: U32, +n: U32, +thr: U32, +setup: Nat, +rep: Nat, +repw: Nat, src: List<&2, G.Vec>) -> IO(Unit):
   +rv = rcv.go(U32.to_nat(k), (k - 1 : U32), k, e, [])
   do IO<Unit>:
     IO.print("received built, checksum " ++ U32.show(fold_rcv(rv, 0)))
     +t2 : Nat <- IO.now()
     +res : Maybe<&2, List<&2, G.Vec>> <- Q.Codec.decode_auto(k, t, rv)
-    +ok : U32 <- IO.pure(U32, verdict(res, src))
-    IO.print("decode ok=" ++ U32.show(ok))
+    +nres : U32 <- IO.pure(U32, len_res(res))
     +t3 : Nat <- IO.now()
-    report(k, t, n, thr, setup, rep, (t3 - t2 : Nat), ok)
+    +ok : U32 <- IO.pure(U32, verdict(res, src))
+    IO.print("decode ok=" ++ U32.show(ok) ++ " symbols=" ++ U32.show(nres))
+    report(k, t, n, thr, setup, rep, repw, (t3 - t2 : Nat), ok)
 
 def enc_phase(m: Maybe<&2, Q.Enc>, +k: U32, +t: U32, +n: U32, +thr: U32, +t0: Nat, src: List<&2, G.Vec>) -> IO(Unit):
   match m:
@@ -118,9 +135,12 @@ def enc_phase(m: Maybe<&2, Q.Enc>, +k: U32, +t: U32, +n: U32, +thr: U32, +t0: Na
       do IO<Unit>:
         IO.print("first repair symbol checksum " ++ U32.show(fold_syms(Q.Codec.symbols(e, k, 1), 0)))
         +t1 : Nat <- IO.now()
-        IO.print("repair checksum " ++ U32.show(fold_syms(Q.Codec.symbols(e, k, n), 0)))
+        +rs : List<&2, G.Vec> <- Q.Codec.symbols_auto(e, k, n)
+        +nrs : U32 <- IO.pure(U32, len_syms(rs, 0))
         +t2 : Nat <- IO.now()
-        decode_phase(e, k, t, n, thr, (t1 - t0 : Nat), (t2 - t1 : Nat), src)
+        IO.print("repair symbols " ++ U32.show(nrs) ++ " checksum " ++ U32.show(fold_syms(rs, 0)))
+        +t3 : Nat <- IO.now()
+        decode_phase(e, k, t, n, thr, (t1 - t0 : Nat), (t2 - t1 : Nat), (t3 - t2 : Nat), src)
 
 def bench(+k: U32, +t: U32, +n: U32) -> IO(Unit):
   +data = bytes.go(U32.to_nat((k * t : U32)), (k * 65536 + t : U32), [])

@@ -101,7 +101,9 @@ def case2(m: Maybe<&2, Q.Enc>, ma: Maybe<&2, Q.Enc>, +k: U32, +t: U32, src: List
         c2 : U32 <- check(mb_eq(dp, da), "decode_auto == decode, K=" ++ U32.show(k) ++ " T=" ++ U32.show(t))
         c3 : U32 <- check(mb_eq(da, Some{src}), "decode_auto recovers the source, K=" ++ U32.show(k) ++ " T=" ++ U32.show(t))
         c4 : U32 <- check(mb_eq(sliced_dec(k, t, rv), dp), "sliced (d=3) decode == decode, K=" ++ U32.show(k) ++ " T=" ++ U32.show(t))
-        IO.pure(U32, (c1 + c2 + c3 + c4 : U32))
+        c5 : U32 <- check(syms_eq(Q.Codec.symbols_par(e, 3, 0, (k + 20 : U32)), Q.Codec.symbols(e, 0, (k + 20 : U32))), "symbols_par d=3 == symbols, K=" ++ U32.show(k) ++ " T=" ++ U32.show(t))
+        c6 : U32 <- check(syms_eq(Q.Codec.symbols_par(e, 2, 3, 37), Q.Codec.symbols(e, 3, 37)), "symbols_par d=2 (esi0=3, n=37) == symbols, K=" ++ U32.show(k) ++ " T=" ++ U32.show(t))
+        IO.pure(U32, (c1 + c2 + c3 + c4 + c5 + c6 : U32))
     case _ _:
       do IO<U32>:
         IO.print("FAIL encoder returned None")
@@ -147,5 +149,7 @@ def main() -> IO(Unit):
     f : U32 <- run_case(300, 512)
     g : U32 <- run_case(1000, 256)
     h : U32 <- edge()
-    fin((a + b + c + d + e + f + g + h : U32))
+    i : U32 <- run_case(100, 36)
+    j : U32 <- run_case(50, 100)
+    fin((a + b + c + d + e + f + g + h + i + j : U32))
 

@@ -72,3 +72,19 @@ a balanced tree gets.)
    every match bumps refcounts atomically on nodes all tasks touch, 2.3x vs 4.2x at 8 threads, and a list walk costs ~18 ns per element anyway
    against ~1 ns per array slot. Shared inputs belong in flat arrays; per-task private data in whatever.
 7. A task's own allocation is cheap (`Array.new` inside the leaf, tree-of-nodes building inside the leaf): allocation is per-lane, no global lock.
+
+## H. `f!(..)` (bang) and clang 19 vs 14 (measured when the box load had dropped to 6-7)
+
+Built with `clang` 19.1.7 first in PATH (`PATH="$HOME/.bend/bin:<dir with clang -> /usr/bin/clang-19>:/usr/bin:/bin"`), run with `--gpu off --threads N`
+(no GPU here, so a bang runs on the CPU pool). Same lab binary source, modes 20-25 = modes 0, 1, 3, 2, 5, 6 with the entry call banged.
+
+* **A bang is exactly a plain fork on the CPU**: balanced tree (leaf ~100 us, 2^13 leaves) 5.3 / 5.9 / 6.5 / 6.1x at 8 threads / 12 threads plain vs banged
+  (5.31 vs 5.90 at 8, 6.48 vs 6.11 at 12), identical within noise for leaf 1 us, 1 ms, nontail, split, chunks, wrapped. **A banged call reached from a
+  sequential loop pays the same round**: 500 rounds of an 8-leaf tree, 3.26x vs 3.27x at 8 threads (and 1.9x at 12 for both: the 4 A520 cores).
+  It does not remove the heap-continuation penalty either (below). Conclusion: nothing to gain from `!` on this machine; not adopted, tests and builds stay on clang 14.
+* **clang 19 vs 14, same C**: kernel loops over arrays are ~20 % *slower* with 19 (balanced tree at 1 thread 855 vs 700 ms, split 639 vs 508), allocation-heavy
+  tree walks are ~1.7x *faster* (`Vec.xor` shape, mode 9: 43 vs 72 ms, mode 11: 48 vs 76), the whole codec (`tools/bench`, 1 thread, K = 1000/4000, T = 16/1024, a
+  busy box) is within noise to ~5 % faster with 19. And with 19 the fork-containing def (mode 10) is slow at ANY thread count (115-132 ms at `--threads` 1 and 2)
+  whereas with 14 it is slow only at `--threads` > 1 (87 ms at 1, 174 at 2): the twin-def rule (D''') still fixes it (43-48 ms, no thread dependence).
+* Which parts of the codec can sit under ONE region: everything symbol-side already does (this work): `Solver.apply_par`, `Codec.symbols_par`, the sliced decode are each
+  one fork tree. The plan (phase 1) is a sequential chain and cannot.
