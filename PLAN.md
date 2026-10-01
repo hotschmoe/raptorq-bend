@@ -20,11 +20,12 @@ Done
 - [x] Benchmarks vs the Rust crate (`docs/benchmarks.md`, `tools/bench`, `tools/bench_rs`), `scripts/test_all.sh`
 - [x] README, LICENSE, `docs/interfaces.md` matching the code
 - [x] Laws/proofs started (see `docs/proofs.md` for what is proven and what is TODO)
+- [x] Flat symbol arenas (`src/flat.bend`; docs/profile.md R1/R3): repair generation, `Solver.apply`, the coefficient side of `Solver.plan`, decoder re-encode (solve 3-5x, decode 4-9x faster)
 
 Not done
 - [ ] Multi-block partitioning (Z > 1, RFC 4.4.1.2 / sub-blocking 4.3), OTI and payload-id framing
 - [ ] Detection of corrupt/inconsistent symbols (overdetermined systems are not checked)
-- [ ] Parity with the Rust crate's speed (currently 13-55x slower solve, up to ~100x decode)
+- [ ] Parity with the Rust crate's speed (currently 7-19x slower solve, 7-25x decode, 20-60x repair at T = 1024; remaining: SIMD and phase 1, docs/benchmarks.md)
 - [ ] GPU target
 - [ ] Remaining TODO proofs (GF(256) multiplication laws, solver correctness, encode/decode round trip)
 
@@ -37,5 +38,6 @@ Not done
 - **GPU target** when clang 19+ is available: the symbol slices of `solve_par` are the natural kernel granularity.
 - **Graph-component phase-1 rule** (RFC 5.4.2.2 pivot choice): measured on the real systems at only a 4-10 % smaller dense tail
   (a few percent of runtime), so low priority (docs/perf.md section 2).
-- Wider-leaf `Vec` (4-8 words per node) to cut the per-word allocation cost of symbol work; share phase 1 between slices.
-- Investigate why generating repair symbols is slower with 12 threads at T = 1024 (docs/benchmarks.md).
+- Phase 1 + row bookkeeping (22 / 123 ms at K = 1000 / 4000, now the biggest T-independent cost): flat CSR rows instead of lists (docs/profile.md R6).
+- A linear (non-`Data`) encoder type that keeps the symbol arena and hands out flat words: removes the copy-in and `Vec` read-out of `Codec.symbols` (about 13 of 17 ms at K = 1000, N = 1000, T = 1024).
+- Upstream: per-call `seq` fast path for `--threads` > 1 (explains the old 12-thread anomalies), `Array.init` for linear elements, SIMD / narrow types (docs/profile.md section 7).

@@ -1,5 +1,10 @@
 # Performance notes (solver, GF(256) symbols, threading)
 
+> Historic document for the tree-symbol (`G.Vec` per word) solver. Since `docs/profile.md` R1/R3 (flat `Array<U32>` symbol arena in
+> `Solver.apply`, flat coefficient arena in `Solver.plan`, flat repair generation, `src/flat.bend`) the numbers and the threading conclusions
+> below no longer describe the code: see `docs/plan_apply.md` (update) and `docs/benchmarks.md` for the current ones. Section 5's
+> `Array` remark has been corrected; the measurements and diagnoses of sections 1-4 stay valid for the tree solver.
+
 Machine: 12-core aarch64 (cix), 30 GB; native binaries (`bend f.bend -o out`, system clang first in `PATH`), always an
 IO `main` (a non-IO `main` uses a much slower evaluator). Harness: `tests/solver_bench.bend`
 (`./sb [--threads N] -- <K> <mode> [<T octets> [<d>]]`; mode 5 = timed inactivation solve, 3 = tail size, 0 = solve + verify by
@@ -154,8 +159,12 @@ word by 4-8x for all symbol work but changes the public `Vec` type.
 
 * A fork reached by sequential code is a runtime round (~0.3 ms with 12 threads). Never fork below ~a millisecond of work; forks
   inside a task are free. `l r = f(..) g(..)` is a fork; `l = f(..)` then `r = g(..)` is not.
-* Plain `Array` ops (`Array.swap/get/set`) are O(log n) path copies and call `Array.size` each time; they are the right tool for
-  O(1)-ish state (rows by id, column index) but cost ~1 us each at 2^16 entries.
+* `Array` ops: the Base source (`Array.get/set` = a descent through `ANode`/`ALeaf` with `Array.size` each time) is what the interpreter
+  runs and reads like O(log n) path copies at ~1 us each, but in a NATIVE binary (`-o`) they are O(1) block operations (docs/profile.md
+  section 5, measured): `Array<U32>` get+set 1-2 ns at 2^8-2^16 slots (4 ns at 2^20, cache), `Array<Data>` of boxed elements (`List`, `Vec`,
+  `Rw`) 4-6 ns per get and 22-30 ns per set (the written value is allocated), still far from microseconds. Correction of an earlier
+  version of this note. Bulk word data therefore belongs in ONE flat `Array<U32>` (`src/flat.bend`); the arrays of `Rw`/`VR` records of
+  phase 1 are fine for bookkeeping. They are the right tool for O(1)-ish state (rows by id, column index).
 * `Array` indices WRAP (`i & (n-1)`): an out-of-range bucket index silently aliases another bucket (bug found and fixed here).
 * A `let`-bound value cannot be scrutinised by `match`, and match scrutinees must follow the parameter order; use helper defs, tuple
   patterns on parameters (`case 1n+q Tuple{a, b}:` matches a `A & B` parameter) and nested constructor patterns

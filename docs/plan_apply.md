@@ -127,3 +127,9 @@ word including cache misses; the hot-cache microbenchmark is 2.9), the read-out 
 148 ms and ~40 ms. What is left of a one-shot solve is the plan (`plan_ms` above, T independent): phase 1 / normalisation 22 ms (K = 1000)
 / 121 ms (K = 4000) and 29 / ~180 ms of coefficient-side work on `Vec` trees (pivot coefficient vectors, dense-row correction, tail
 Gauss-Jordan).
+
+Later changes to the same code (Stage 2b / 2c): the coefficient side of `Solver.plan` (pivot coefficient vectors, leftover rows, dense-row correction, tail
+Gauss-Jordan with unit vectors) also runs on a flat arena now (`p2.*`, docs/solver.md), plan K = 1000 / 4000: 52 -> 29, 333 -> 162 ms (T independent);
+and `Solver.auto_depth` slices the symbols only for blocks of >= 2^23 words (the arena apply costs 4 ns/word, so 8 slices lose against their fork rounds;
+12-thread numbers now equal 1-thread numbers at the benchmark sizes), `decode_auto` / `decode_with_plan_auto` take the arena path then.
+Current one-shot numbers: docs/benchmarks.md.

@@ -6,6 +6,16 @@ Everything here was measured on the benchmark box (12-core aarch64 cix, big.LITT
 `bend f.bend -o out`, system clang 14 first in `PATH`, IO `main`), on a scratch copy of the repo at commit e29b139.
 Reproduce with `tools/profile/` (section 9).
 
+**Status (after the follow-up implementation):** R1 (flat repair generation, decoder re-encode), R3 (symbol arena in `Solver.apply`, extended to the
+coefficient side of `Solver.plan`) and the `Solver.auto_depth` change are implemented (commits "Stage 1", "Stage 2", "Stage 2b", "Stage 2c"; code in
+`src/flat.bend`, `src/solver.bend`); results in `docs/benchmarks.md`, details in `docs/plan_apply.md` (update). What the predictions got
+right and wrong: T = 1024 solve K = 1000: 286 -> 68 ms (predicted 45-60), K = 4000: 1401 -> 354 ms (predicted 200-280), because the symbol-independent
+plan (phase 1, T independent) was 160-330 ms by itself and R3 as written did not touch the coefficient-side tree work, which had to be flattened too
+(Stage 2b: plan 330 -> 162 ms at K = 4000); repair generation K = 1000, T = 1024, N = 1000: 87 -> 30 ms through the public API (predicted 3-4 ms, which holds for
+the XOR loops alone: 2.5 ms) because `Codec.symbols` converts trees to a flat array and back on every call (`Enc` is `Data`, an `Array` is linear). Rust/Bend ratio now 7-19x
+(solve), 7-25x (decode). Corrections made to other docs as a result: `docs/perf.md` section 5 (`Array` ops are O(1) natively, not O(log n) path copies), the
+`docs/benchmarks.md` 12-thread repair note (explained by section 6: the `seq` effect).
+
 Method notes: single-thread numbers are pinned (`taskset -c 10`, an A720 at 2.5 GHz) and are the minimum of 5 runs; other jobs
 share the machine, so expect +-10-30 % noise (the C baselines moved by that much between runs). Ratios are what matter.
 `ns/word` = per 4-octet U32 word of symbol data.

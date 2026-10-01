@@ -12,12 +12,14 @@ inactivation-decoding solver over GF(256), systematic encoder and decoder.
   constraint-matrix rows, intermediate symbols, every encoding symbol (source and repair) of 18+5 (K,T) cases including odd
   symbol sizes, and 190 decode cases (15 where the reference decoder fails, where Bend also returns `None`). See
   `tests/vectors/README.md` (K = 1 .. 1000 incl. T = 4, 5, 16, 32).
-* Single source block, `1 <= K <= 56403`; the full K' = 56403 system solves (15-36 s, `docs/perf.md`).
+* Single source block, `1 <= K <= 56403`; the full K' = 56403 system solves in 7 s (T = 16) / 13 s (T = 1024) of wall time including two row
+  builds, 1 thread, peak RSS 282 / 852 MB (`tests/solver_bench.bend` mode 5; was 15 / 36 s, `docs/perf.md`).
 * **Limitations:**
   * no multi-block partitioning (Z > 1), no sub-blocking, no OTI / payload-id packet framing (RFC 4.3, 4.4);
   * no detection of corrupt symbols: an inconsistent overdetermined system is not noticed, the decoder returns the code word
     nearest the solver's choice;
-  * speed: 13-55x slower than the Rust crate for the solve, up to ~100x for decode (`docs/benchmarks.md`);
+  * speed: 7-19x slower than the Rust crate for the solve, 7-25x for decode, 20-60x for generating T = 1024 repair symbols
+    (`docs/benchmarks.md`; pure Bend, no SIMD, no foreign code);
   * the GPU target (`!`) needs clang 19+, which is not available here: everything is developed on the C (and JS) targets;
   * developed on aarch64 with clang 14. Native binaries need the system clang first in `PATH`:
     `export PATH="$HOME/.bend/bin:/usr/bin:/bin:$PATH"` (the default `clang` on the dev box is a GPU-vendor build that fails with
@@ -55,26 +57,29 @@ out <- Q.Codec.decode_auto(k, t, received)
 Full signatures: `docs/interfaces.md`; codec details: `docs/codec.md`.
 
 ## Performance
-Native binary, aarch64 12 cores, K source symbols, 7/8 of the decode input repair symbols (min of 3, ms; details and caveats in
-`docs/benchmarks.md`). Bend/Rust = slowdown factor of Bend (1 thread).
+Native binary, aarch64 12 cores (one Cortex-A720 core for the 1-thread and Rust numbers), K source symbols, 7/8 of the decode input repair
+symbols (min of 3, ms; details and caveats in `docs/benchmarks.md`). Bend/Rust = slowdown factor of Bend (1 thread). Pure Bend: symbols are
+slices of one flat `Array<U32>` with a 64K product table, tail-recursive loops (`src/flat.bend`).
 
 | K | T | Rust setup | Bend setup 1 / 12 thr | Bend/Rust | Rust decode | Bend decode 1 / 12 thr | Bend/Rust |
 |---|---|---|---|---|---|---|---|
-| 100 | 16 | 0.3 | 4 / 5 | 13x | 0.4 | 5 / 4 | 12x |
-| 100 | 1024 | 0.7 | 27 / 10 | 39x | 0.7 | 35 / 83 | 50x |
-| 1000 | 16 | 3.9 | 56 / 52 | 14x | 3.0 | 55 / 59 | 18x |
-| 1000 | 1024 | 6.8 | 287 / 105 | 42x | 6.8 | 408 / 322 | 60x |
-| 4000 | 16 | 12 | 300 / 300 | 26x | 11 | 401 / 436 | 36x |
-| 4000 | 1024 | 26 | 1419 / 611 | 55x | 24 | 2335 / 2135 | 99x |
-| 10000 | 16 | 33 | 941 / 963 | 28x | 26 | 1457 / 1534 | 55x |
-| 10000 | 1024 | 74 | 4066 / 2046 | 55x | 63 | 6961 / 6646 | 110x |
+| 100 | 16 | 0.3 | 2 / 6 | 6.7x | 0.3 | 3 / 2 | 10x |
+| 100 | 1024 | 0.6 | 6 / 12 | 10x | 0.6 | 8 / 8 | 13x |
+| 1000 | 16 | 2.4 | 30 / 34 | 12x | 2.1 | 31 / 30 | 15x |
+| 1000 | 1024 | 5.4 | 68 / 72 | 13x | 5.9 | 93 / 91 | 16x |
+| 4000 | 16 | 9.9 | 168 / 168 | 17x | 10 | 211 / 205 | 20x |
+| 4000 | 1024 | 23 | 354 / 354 | 15x | 27 | 499 / 491 | 19x |
+| 10000 | 16 | 30 | 557 / 536 | 19x | 30 | 734 / 724 | 25x |
+| 10000 | 1024 | 69 | 1069 / 1049 | 15x | 81 | 1541 / 1510 | 19x |
 
-The Rust crate is a mature, optimised implementation; this one is new (the solver went from 0.57 s to 53 ms at K=1000 in the
-last optimisation round, `docs/perf.md`). Threads only help where symbols are sliced (T >= 256).
+Before the flat-symbol work (symbols as trees of boxed words) the same table read 13-55x (solve) and 12-110x (decode). The gap that is left is
+SIMD (the Rust crate uses NEON kernels; Bend 2 has no vector or narrow types: the Bend multiply-add kernel is at scalar-C parity,
+3.4 ns/word, but 7-9x from NEON) and our phase-1 bookkeeping. 12 threads no longer help: the symbol work is too cheap to slice below
+2^23 words (docs/benchmarks.md, docs/plan_apply.md).
 
 ## Repository layout
 ```
-src/            gf256 (symbol vectors), tables (RFC 5.5/5.6), rfc_funcs (Rand/Deg/Tuple, parameters), types, constraints
+src/            gf256 (symbol vectors), flat (flat Array<U32> symbols + kernels), tables (RFC 5.5/5.6), rfc_funcs (Rand/Deg/Tuple, parameters), types, constraints
                 (matrix rows, LT/PI encode), solver (inactivation decoding), raptorq (Codec), raptorq_demo, laws_defs
 tests/          *_test.bend suites, generated fixtures, tests/vectors (golden vectors from the Rust crate), tests/vectors2
 tools/          generators (Python/Rust) for tables, fixtures and vectors; tools/bench, tools/bench_rs (benchmarks)

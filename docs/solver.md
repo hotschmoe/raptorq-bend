@@ -8,8 +8,9 @@ trailing columns, `R.P(sp)` for RaptorQ), `Solver.solve_dense(l, rows)` (oracle)
 * `Solver.solve_par(l, p, d, rows)`: the symbols are cut into 2^d word ranges that are solved concurrently (d is capped at
   log2(words per symbol); d = 0 is `solve_p`). Worth it for symbols >= 256 octets with `--threads` >= 8 (d = 3): 1.5-3.5x faster at
   K = 1000..10000, T = 256..4096. Costs CPU x 2^d (each slice repeats the symbol-independent work).
-* `Solver.solve_auto(l, p, rows) : IO(Maybe<&2, List<&2, Sym>>)`: `solve_par` with d = 0 below 64 words per symbol, else
-  min(3, log2 `IO.thread_count()`).
+* `Solver.solve_auto(l, p, rows) : IO(Maybe<&2, List<&2, Sym>>)`: `solve_par` with d = 0 below 64 words per symbol or below 2^23 words of
+  symbol data in total (`Solver.auto_depth`), else min(3, log2 `IO.thread_count()`). With the flat-arena apply, slicing only pays for
+  very large blocks (see `docs/plan_apply.md`, update); the sentence about 1.5-3.5x below is from the tree-symbol solver.
 
 Tests (all exit non-zero on failure):
 * `bend tests/solver_test.bend` (~7 s, `ALL PASS`): 24 synthetic GF(256) systems from `tests/solver_fixtures.bend`
@@ -83,6 +84,7 @@ separate phases 4/5 (the result is the same unique solution since A has full ran
 permanent ones): K=1000: 79 (P=50), 4000: 142 (100), 10000: 218 (158), 20000: 317 (224), 56403: 604 (375).
 
 ## Benchmarks (details and diagnosis in `docs/perf.md`)
+(Historic: measured with the tree-symbol solver before `docs/profile.md` R1/R3; current numbers are in `docs/benchmarks.md`: K=1000 T=1024 solve + first symbol 69 ms instead of 0.29 s, K=4000 T=1024 0.35 s instead of 1.4 s on one thread.)
 Solve only, `--threads 1`, T = 16 octets: K=100 4 ms, 500 24 ms, 1000 53 ms, 2000 0.12 s, 4000 0.28 s, 10000 0.91 s, 20000 2.7 s,
 K'=56403 (L=57326) 14.7 s (before: 0.57 s at K=1000, 8.3 s at K=4000, 57 s at K=10000, hours at K'=56403). T = 1024 octets: K=1000
 0.29 s, 4000 1.4 s, 10000 4.0 s, K'=56403 36 s; with `solve_par` d=3 on 12 threads 0.10 s, 0.60 s, 2.1 s, 24 s.
