@@ -1817,9 +1817,19 @@ def Vec.to_list(v: Vec, acc: List<&2, U32>) -> List<&2, U32>:
     case VNode{l, r}:
       Vec.to_list(l, Vec.to_list(r, acc))
 
-# Build a balanced tree from the first c words of xs; fuel d bounds the depth
-# (32 is plenty for a U32 count). Halves are built in parallel.
-def Vec.build(+d: Nat, +c: U32, +xs: List<&2, U32>) -> Vec:
+# smallest d with 2^d >= n (0 for n <= 1)
+def Vec.clog(+n: U32) -> Nat:
+  match n:
+    case 0:
+      0n
+    case 1:
+      0n
+    case _:
+      (1n + U32.log2((n - 1 : U32)) : Nat)
+
+# Build a balanced tree from the first c words of xs; fuel d bounds the depth (32 is plenty for a U32
+# count).  Vec.build.seq is the plain sequential version.
+def Vec.build.seq(+d: Nat, +c: U32, +xs: List<&2, U32>) -> Vec:
   match d:
     case 0n:
       VNil{}
@@ -1835,8 +1845,35 @@ def Vec.build(+d: Nat, +c: U32, +xs: List<&2, U32>) -> Vec:
               VWord{h}
         case _:
           +h = U32.shr(c)
-          l r = Vec.build(p, h, List.take(&2, U32, xs, U32.to_nat(h))) Vec.build(p, (c - h : U32), List.drop(&2, U32, xs, U32.to_nat(h)))
-          VNode{l, r}
+          VNode{Vec.build.seq(p, h, List.take(&2, U32, xs, U32.to_nat(h))), Vec.build.seq(p, (c - h : U32), List.drop(&2, U32, xs, U32.to_nat(h)))}
+
+# fk = levels that fork (like the zipped ops: only subtrees above 2^CUT_LOG2 words are split into
+# parallel tasks; a fork costs a whole runtime round).
+def Vec.build.go(+fk: Nat, +d: Nat, +c: U32, +xs: List<&2, U32>) -> Vec:
+  match fk:
+    case 0n:
+      Vec.build.seq(d, c, xs)
+    case 1n+q:
+      match d:
+        case 0n:
+          VNil{}
+        case 1n+p:
+          match c:
+            case 0:
+              VNil{}
+            case 1:
+              match xs:
+                case Nil{}:
+                  VNil{}
+                case Con{h, t}:
+                  VWord{h}
+            case _:
+              +h = U32.shr(c)
+              l r = Vec.build.go(q, p, h, List.take(&2, U32, xs, U32.to_nat(h))) Vec.build.go(q, p, (c - h : U32), List.drop(&2, U32, xs, U32.to_nat(h)))
+              VNode{l, r}
+
+def Vec.build(+d: Nat, +c: U32, +xs: List<&2, U32>) -> Vec:
+  Vec.build.go(fork_depth(CUT_LOG2(), Vec.clog(c)), d, c, xs)
 
 # Build a balanced Vec from a list of packed words.
 def Vec.from_list(+xs: List<&2, U32>) -> Vec:
