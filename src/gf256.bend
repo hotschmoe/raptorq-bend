@@ -1664,67 +1664,149 @@ type Vec is Data:
 # `Vec.from_list` from lists of equal length always have equal shape. On a
 # shape mismatch the first argument's subtree is returned unchanged (totality).
 
-def Vec.xor(a: Vec, b: Vec) -> Vec:
-  match a b:
-    case VNode{al, ar} VNode{bl, br}:
-      l r = Vec.xor(al, bl) Vec.xor(ar, br)
-      VNode{l, r}
-    case VWord{x} VWord{y}:
-      VWord{U32.xor(x, y)}
-    case x _:
-      x
+# Fork policy.  The Bend runtime runs parallel work in bulk-synchronous rounds: every fork reached by
+# sequential code costs one round (~0.3 ms with 12 threads, measured), which is thousands of word
+# operations.  A subtree is therefore only split into two tasks while it holds more than 2^CUT_LOG2()
+# words (4096 words = 16 KiB; measured: below ~64k words per vector forking never wins, between 4k and
+# 64k it is a small loss, at 256k words it gives 2.2x on 12 threads); below that the recursion is a plain
+# sequential walk.  The fork depth is computed once per call from the right spine of the balanced tree
+# (`Vec.depth`); the zipped `.go` workers fork while they have fork depth left.
+def CUT_LOG2() -> Nat:
+  12n
 
-# The zero vector of the same shape as v.
-def Vec.zeros(v: Vec) -> Vec:
+# number of levels of the right spine = ceil(log2(words)) + 1 for a balanced tree (0 for VNil)
+def Vec.depth(v: Vec) -> Nat:
   match v:
     case VNode{l, r}:
-      zl zr = Vec.zeros(l) Vec.zeros(r)
-      VNode{zl, zr}
+      (1n + Vec.depth(r) : Nat)
     case VWord{_}:
-      VWord{0}
+      1n
     case VNil{}:
-      VNil{}
+      0n
+
+# a - b, saturating at 0
+def fork_depth(b: Nat, a: Nat) -> Nat:
+  match b:
+    case 0n:
+      a
+    case 1n+bp:
+      match a:
+        case 0n:
+          0n
+        case 1n+ap:
+          fork_depth(bp, ap)
+
+# levels at which a vector must fork: depth - 1 - CUT_LOG2
+def Vec.fork_levels(v: Vec) -> Nat:
+  fork_depth((1n + CUT_LOG2() : Nat), Vec.depth(v))
+
+def Vec.xor.go(+fk: Nat, a: Vec, b: Vec) -> Vec:
+  match fk:
+    case 0n:
+      match a b:
+        case VNode{al, ar} VNode{bl, br}:
+          VNode{Vec.xor.go(fk, al, bl), Vec.xor.go(fk, ar, br)}
+        case VWord{x} VWord{y}:
+          VWord{U32.xor(x, y)}
+        case x _:
+          x
+    case 1n+q:
+      match a b:
+        case VNode{al, ar} VNode{bl, br}:
+          l r = Vec.xor.go(q, al, bl) Vec.xor.go(q, ar, br)
+          VNode{l, r}
+        case VWord{x} VWord{y}:
+          VWord{U32.xor(x, y)}
+        case x _:
+          x
+
+def Vec.xor(+a: Vec, b: Vec) -> Vec:
+  Vec.xor.go(Vec.fork_levels(a), a, b)
+
+# The zero vector of the same shape as v.
+def Vec.zeros.go(+fk: Nat, v: Vec) -> Vec:
+  match fk:
+    case 0n:
+      match v:
+        case VNode{l, r}:
+          VNode{Vec.zeros.go(fk, l), Vec.zeros.go(fk, r)}
+        case VWord{_}:
+          VWord{0}
+        case VNil{}:
+          VNil{}
+    case 1n+q:
+      match v:
+        case VNode{l, r}:
+          zl zr = Vec.zeros.go(q, l) Vec.zeros.go(q, r)
+          VNode{zl, zr}
+        case VWord{_}:
+          VWord{0}
+        case VNil{}:
+          VNil{}
+
+def Vec.zeros(+v: Vec) -> Vec:
+  Vec.zeros.go(Vec.fork_levels(v), v)
 
 # c * v
-def Vec.scale.go(+c: U32, v: Vec) -> Vec:
-  match v:
-    case VNode{vl, vr}:
-      l r = Vec.scale.go(c, vl) Vec.scale.go(c, vr)
-      VNode{l, r}
-    case VWord{w}:
-      VWord{mulw(c, w)}
-    case VNil{}:
-      VNil{}
+def Vec.scale.go(+fk: Nat, +c: U32, v: Vec) -> Vec:
+  match fk:
+    case 0n:
+      match v:
+        case VNode{vl, vr}:
+          VNode{Vec.scale.go(fk, c, vl), Vec.scale.go(fk, c, vr)}
+        case VWord{w}:
+          VWord{mulw(c, w)}
+        case VNil{}:
+          VNil{}
+    case 1n+q:
+      match v:
+        case VNode{vl, vr}:
+          l r = Vec.scale.go(q, c, vl) Vec.scale.go(q, c, vr)
+          VNode{l, r}
+        case VWord{w}:
+          VWord{mulw(c, w)}
+        case VNil{}:
+          VNil{}
 
-def Vec.scale(c: U32, v: Vec) -> Vec:
+def Vec.scale(c: U32, +v: Vec) -> Vec:
   match c:
     case 0:
       Vec.zeros(v)
     case 1:
       v
     case _:
-      Vec.scale.go(c, v)
+      Vec.scale.go(Vec.fork_levels(v), c, v)
 
 # dst ^ c*src, fused in one traversal.
-def Vec.muladd.go(+c: U32, dst: Vec, src: Vec) -> Vec:
-  match dst src:
-    case VNode{dl, dr} VNode{sl, sr}:
-      l r = Vec.muladd.go(c, dl, sl) Vec.muladd.go(c, dr, sr)
-      VNode{l, r}
-    case VWord{x} VWord{y}:
-      VWord{U32.xor(x, mulw(c, y))}
-    case x _:
-      x
+def Vec.muladd.go(+fk: Nat, +c: U32, dst: Vec, src: Vec) -> Vec:
+  match fk:
+    case 0n:
+      match dst src:
+        case VNode{dl, dr} VNode{sl, sr}:
+          VNode{Vec.muladd.go(fk, c, dl, sl), Vec.muladd.go(fk, c, dr, sr)}
+        case VWord{x} VWord{y}:
+          VWord{U32.xor(x, mulw(c, y))}
+        case x _:
+          x
+    case 1n+q:
+      match dst src:
+        case VNode{dl, dr} VNode{sl, sr}:
+          l r = Vec.muladd.go(q, c, dl, sl) Vec.muladd.go(q, c, dr, sr)
+          VNode{l, r}
+        case VWord{x} VWord{y}:
+          VWord{U32.xor(x, mulw(c, y))}
+        case x _:
+          x
 
 # dst ^= c * src  (functional: returns the new dst)
-def Vec.muladd(c: U32, dst: Vec, src: Vec) -> Vec:
+def Vec.muladd(c: U32, +dst: Vec, src: Vec) -> Vec:
   match c:
     case 0:
       dst
     case 1:
       Vec.xor(dst, src)
     case _:
-      Vec.muladd.go(c, dst, src)
+      Vec.muladd.go(Vec.fork_levels(dst), c, dst, src)
 
 def Vec.to_list(v: Vec, acc: List<&2, U32>) -> List<&2, U32>:
   match v:
