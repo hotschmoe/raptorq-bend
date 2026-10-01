@@ -107,13 +107,14 @@ def check(res: Maybe<&2, List<&2, G.Vec>>, +ex: U32, sol: List<&2, U32>) -> U32:
           fail(lst_eq(flat(v), sol))
 
 # ---- one system -----------------------------------------------------------------------------
-# returns failures: bit 0 = dense oracle wrong, bit 1 = inactivation solver wrong
+# returns failures: bit 0 = dense oracle wrong, bit 1 = inactivation solver wrong, bit 2 = symbol-sliced solver wrong
 def run_sys(+l: U32, +p: U32, nr: U32, +ex: U32, +body: List<&2, U32>) -> U32:
   +nrn = U32.to_nat(nr)
   +sol = List.take(&2, U32, after_rows(nrn, body), U32.to_nat((2 * l : U32)))
   a = check(S.Solver.solve_dense(l, rows_of(nrn, body, Nil{})), ex, sol)
   b = check(S.Solver.solve_p(l, p, rows_of(nrn, body, Nil{})), ex, sol)
-  (a + 2 * b : U32)
+  c = check(S.Solver.solve_par(l, p, 1, rows_of(nrn, body, Nil{})), ex, sol)
+  (a + 2 * b + 4 * c : U32)
 
 def next_sys(+l: U32, nr: U32, ex: U32, body: List<&2, U32>) -> List<&2, U32>:
   match ex:
