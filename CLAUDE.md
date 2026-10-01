@@ -4,7 +4,8 @@ RFC 6330 RaptorQ in Bend 2. Goals, in order: (1) bit-exact RFC 6330 compliance, 
 
 ## Environment
 - `export PATH="$HOME/.bend/bin:$PATH"`; `export BEND_NO_TELEMETRY=1`. Run `bend guide` (also `bend base`) BEFORE writing code; read `~/.bend/guide/*.md`.
-- Run a file: `bend file.bend`. Check proofs: `bend PROOF.bend`. clang 15 only (no GPU/`!` — needs 19+); develop on the C/JS targets.
+- Run a file: `bend file.bend`. Check proofs: `bend PROOF.bend`. `!`/GPU needs clang 19+ (not available); develop on the C/JS targets.
+- Building binaries (`bend f.bend -o out`): put the system clang first: `export PATH="$HOME/.bend/bin:/usr/bin:/bin:$PATH"`. The default `clang` on this aarch64 box is a GPU-vendor build (/usr/share/cix/bin) that fails with "unknown target triple x86_64". `bend f.bend` (run) works either way.
 - Bend limits: numbers are Nat/U32/F32 only (no U8/U64 — store GF(256) octets as U32), affine values, no if/else (match on True/False), termination required, no mutual recursion, strings are slow.
 
 ## References (git-ignored, in `ref/`)

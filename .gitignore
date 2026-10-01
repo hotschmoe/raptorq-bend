@@ -1,3 +1,4 @@
 ref/
 build/
 *.out
+tools/__pycache__/
