@@ -34,6 +34,13 @@ rhs symbol per row (same order). `solve_p`, `solve`, `solve_par`, `solve_auto` a
 `solver_test` / `solver_golden_test` check apply(plan) against the known / RFC solutions and reuse one plan on two other payloads
 (T = 4 octets, and T doubled); `codec_plan_test` does the same on the golden codec vectors.
 
+## Coefficient arena (plan, materialisation + phase 2)
+The coefficient side of the plan (pivot coefficient vectors V_k over the tail columns Ci, the leftover sparse rows, the dense rows
+corrected for every pivot, and the tail Gauss-Jordan with unit vectors as rhs) runs on one flat `Array<U32>` too: coefficients are packed
+4 octets per word and combined by the same slice kernels as symbols (`p2.*` in `src/solver.bend`). The old tree version (`dg_*` with a
+row tree, `vget_oct` point accesses) remains only in `Solver.solve_dense`, the oracle. Rank deficiency is still detected as "no
+pivot row for column c" in the Gauss-Jordan; tail row i is leftover row i (in row order) or dense row i - nleft.
+
 ## Symbol arena (apply)
 `Solver.apply` replays the plan on one flat `Array<U32>` (all rhs / pivot / tail-row / solution symbols as slices, plus a 64K product table
 for symbols of >= 8 words): see `docs/plan_apply.md` (update) and `src/flat.bend`. `Solver.apply_arena` returns the arena itself.

@@ -401,6 +401,14 @@ def Flat.scale(+c: U32, +tab: Bool, +w: Nat, +db: U32, a: Array<U32>) -> Array<U
     case _:
       Flat.axset(c, tab, w, db, db, a)
 
+# a[i] ^= x
+def Flat.wxor.f(+i: U32, +x: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, y) = rd
+  Array.set(U32, a, i, U32.xor(y, x))
+
+def Flat.wxor(+i: U32, +x: U32, a: Array<U32>) -> Array<U32>:
+  Flat.wxor.f(i, x, Array.get(U32, a, i))
+
 # d ^= sum over terms Term{idx, f} of f * (symbol idx at slot base + idx * wu); `first` = the destination is not initialised yet:
 # the first term sets it (an empty list zeroes it)
 def Flat.fold.go(ts: List<&2, Y.Term>, +tab: Bool, +w: Nat, +wu: U32, +db: U32, +base: U32, a: Array<U32>) -> Array<U32>:
