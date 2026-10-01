@@ -1,9 +1,11 @@
 # Solver benchmark / integration test on REAL RaptorQ systems (src/constraints.bend).
 # Usage:  bend tests/solver_bench.bend -o sb;  ./sb [--threads N] -- <K> <mode> [<T octets, default 16> [<d>]]
-#   d = log2 of the number of symbol slices solved in parallel (Solver.solve_par), default 0
-#   mode 0 = Solver.solve_p (inactivation) + verify, 1 = Solver.solve_dense (oracle) + verify, 2 = only build the rows,
-#   3 = print the inactive-set size, 4 = solve only (not verified), 5 = timed inactivation solve, 6 = timed dense oracle: prints "rows ms", "solve ms" (rows built twice,
-#   the second build is subtracted) and a checksum of C.
+#   d = log2 of the number of symbol slices solved in parallel (Solver.solve_par), default 0.
+#   mode 0 = Solver.solve_par (inactivation) + verify, 1 = Solver.solve_dense (oracle) + verify, 2 = only build the rows,
+#   3 = print the inactive-set size, 4 = solve only (not verified),
+#   5 = timed inactivation solve: prints "rows ms", "solve ms" (the rows are built twice, the second build is
+#       subtracted) and a checksum of C,  6 = same for the dense oracle,
+#   8 = timed Solver.solve_auto (slicing depth from the thread count; time includes the row build).
 # Builds the K'x(S+H+K') system with LCG-random source symbols (T octets), solves it, then (modes 0/1) checks
 # C by re-encoding every source ISI (Constraints.encode must give back the source symbol).
 # Prints "OK ..." and exits 0, or dies with exit code 1.
@@ -157,6 +159,15 @@ def timed(mode: U32, +sp: T.SP, +tw: U32, +d: U32, +src: List<&2, G.Vec>) -> IO(
     +t2 : Nat <- IO.now()
     IO.print("T=" ++ U32.show((4 * tw : U32)) ++ " octets, slices 2^" ++ U32.show(d) ++ ": rows ms=" ++ Nat.show((t1 - t0 : Nat)) ++ " solve ms=" ++ Nat.show((t2 - t1 - (t1 - t0) : Nat)) ++ " (total with 2nd row build " ++ Nat.show((t2 - t1 : Nat)) ++ ")")
 
+# mode 8: Solver.solve_auto (slicing depth from IO.thread_count and the symbol size); time includes the row build
+def timed_auto(+sp: T.SP, +tw: U32, +src: List<&2, G.Vec>) -> IO(Unit):
+  do IO<Unit>:
+    +t0 : Nat <- IO.now()
+    r : Maybe<&2, List<&2, G.Vec>> <- S.Solver.solve_auto(R.L(sp), R.P(sp), rows_of(sp, tw, src))
+    IO.print("checksum of C: " ++ U32.show(msum(r)))
+    +t1 : Nat <- IO.now()
+    IO.print("T=" ++ U32.show((4 * tw : U32)) ++ " octets, solve_auto: rows+solve ms=" ++ Nat.show((t1 - t0 : Nat)))
+
 def go2(mode: U32, +sp: T.SP, +tw: U32, +d: U32, +src: List<&2, G.Vec>) -> IO(Unit):
   match mode:
     case 2:
@@ -169,6 +180,8 @@ def go2(mode: U32, +sp: T.SP, +tw: U32, +d: U32, +src: List<&2, G.Vec>) -> IO(Un
       timed(0, sp, tw, d, src)
     case 6:
       timed(1, sp, tw, d, src)
+    case 8:
+      timed_auto(sp, tw, src)
     case _:
       report(solve(mode, sp, tw, d, src), src, sp)
 

@@ -1504,6 +1504,28 @@ def solve_par2(+dd: Nat, +l: U32, +p: U32, +rows: List<&2, T.Row>) -> Maybe<&2, 
 def Solver.solve_par(+l: U32, +p: U32, +d: U32, +rows: List<&2, T.Row>) -> Maybe<&2, List<&2, G.Vec>>:
   solve_par2(cap(U32.to_nat(d), sw_log(rows_sw(rows))), l, p, rows)
 
+# Slicing depth for t threads and symbols of sw words: none below 64 words (256 octets), else log2(threads) capped at 3
+# (8 slices; 16 slices on 12 threads were slower, see docs/perf.md).
+def auto_d.go(small: Bool, +t: U32) -> U32:
+  match small:
+    case True{}:
+      0
+    case False{}:
+      U32.min(3, U32.from_nat(U32.log2(U32.max(t, 1))))
+
+def auto_d(+t: U32, +sw: U32) -> U32:
+  auto_d.go(U32.is_lt(sw, 64), t)
+
+def solve_auto2(t: U32, +l: U32, +p: U32, +rows: List<&2, T.Row>) -> Maybe<&2, List<&2, G.Vec>>:
+  Solver.solve_par(l, p, auto_d(t, rows_sw(rows)), rows)
+
+# Solver.solve_par with the slicing depth chosen from the thread count of the running binary (IO.thread_count)
+# and the symbol size.  For callers that live in IO.
+def Solver.solve_auto(+l: U32, +p: U32, +rows: List<&2, T.Row>) -> IO(Maybe<&2, List<&2, G.Vec>>):
+  do IO<Maybe<&2, List<&2, G.Vec>>>:
+    t : U32 <- IO.thread_count()
+    IO.pure(Maybe<&2, List<&2, G.Vec>>, solve_auto2(t, l, p, rows))
+
 # Diagnostics: size of the dense inactive system after phase 1 (columns that are not pivots).
 def inactive_count.fin(st: P1, +l: U32) -> U32:
   match st:
