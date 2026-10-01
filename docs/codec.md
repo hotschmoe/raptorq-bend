@@ -16,6 +16,11 @@
 | `Codec.decode(k, t, received: List<&2,Y.Rcv>) -> Maybe<&2,List<&2,Sym>>` | `Rcv{esi, sym}` in any order. `fixed ++ received_rows` -> `Solver.solve_p(L, P, ..)` -> source symbols ESI 0..K-1. `None` if fewer than K symbols, invalid K/T, or rank deficient (RFC 5.4.2 failure) |
 
 Design notes
+* Flat symbol path (`src/flat.bend`, docs/profile.md R1): `Codec.symbols` (for more than about L/40 symbols; fewer take the per-symbol
+  tree path) and `Codec.decode` / `decode_with_plan` (the K source-symbol re-encodings) copy the L intermediate symbols ONCE into one
+  `Array<U32>` (symbol c at slots c*W..), compute each encoding symbol as a tail-recursive loop that XORs the LT/PI columns' slices
+  into a scratch slice (first term copies), and read the scratch slice out as a `Vec` (same shape as `Vec.from_list`). `Codec.symbol`
+  (one ESI) keeps the tree path. `Enc` stays `Data` (an `Array` is linear, so it cannot live in it), hence the copy per call.
 * `decode` re-encodes ALL K source symbols from the intermediate symbols (the received source symbols are not copied
   through). For consistent input this is identical; with corrupted input the result is the code word nearest the solver's
   choice, not the received bytes (the solver does not detect inconsistent overdetermined systems, see solver.md).

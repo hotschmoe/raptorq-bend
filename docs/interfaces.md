@@ -22,6 +22,12 @@ Plain defs (`C.fixed`, ...). Rows of `fixed` are S LDPC then H HDPC rows.
 - `C.index(inter: List<&2, G.Vec>) -> C.ITree` (O(log L) lookup), `C.encode_idx(sp, tree, isi) -> G.Vec`,
   `C.encode(sp, inter, isi) -> G.Vec` (list version), `C.isi_of(esi, k, kp) -> U32`, `C.zero(t) -> G.Vec`.
 
+## Flat symbols (`src/flat.bend`; docs/profile.md)
+Symbols as slices of one `Array<U32>` (`Array` is linear: every def threads it through and returns it). `Flat.of_vec(v) -> Array<U32>`,
+`Flat.to_vec(n, a) -> G.Vec` (round trip), `Flat.put_vec(v, base, a) -> Array`, `Flat.get_vec(a, base, n) -> Bv{v, a}`, kernels
+`Flat.xr/cp/zr/ms/ma.loop(n, 0, db, sb[, c], a)` (a[db+j] ^= / = / 0 / c* / ^= c* a[sb+j], j < n), `Flat.encode_tree(sp, k, tr, esi0, n)` and
+`Flat.encode_list(sp, k, inter, esi0, n)` (encoding symbols from the intermediate symbols; used by `Codec.symbols` / `Codec.decode`).
+
 ## Solver (`src/solver.bend`, RFC 5.4.2; see `docs/solver.md`, `docs/perf.md`)
 All return `Maybe<&2, List<&2, G.Vec>>` = C[0..L-1] (`None` if rank < L), except `solve_auto` (IO) and `inactive_count`.
 Rows may list columns in any order, repeat a column or carry zero coefficients. Inconsistent overdetermined systems are NOT

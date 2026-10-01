@@ -18,6 +18,7 @@ import ./tables.bend as T
 import ./rfc_funcs.bend as R
 import ./constraints.bend as C
 import ./solver.bend as S
+import ./flat.bend as F
 
 # ---------------------------------------------------------------------------
 # Small tail-recursive list helpers (Base's List.length / List.append are not tail recursive and
@@ -245,7 +246,7 @@ def Codec.symbol(+enc: Enc, +esi: U32) -> G.Vec:
 def Codec.repair(+enc: Enc, +esi: U32) -> G.Vec:
   Codec.symbol(enc, esi)
 
-# n encoding symbols for ESI esi0, esi0+1, ...
+# n encoding symbols for ESI esi0, esi0+1, ... via the per-symbol tree path (cheap for a handful of symbols)
 def symbols.go(n: Nat, +esi: U32, +enc: Enc, acc: List<&2, G.Vec>) -> List<&2, G.Vec>:
   match n:
     case 0n:
@@ -253,27 +254,37 @@ def symbols.go(n: Nat, +esi: U32, +enc: Enc, acc: List<&2, G.Vec>) -> List<&2, G
     case 1n+p:
       symbols.go(p, (esi - 1 : U32), enc, Codec.symbol(enc, esi) <> acc)
 
+# Many symbols: the L intermediate symbols are copied ONCE into one flat Array<U32> and every symbol is a tail loop over
+# slices (src/flat.bend, docs/profile.md R1); few symbols: the tree walk (the copy costs about 40 tree-path symbols).
+# Same symbols either way, bit for bit.
+def symbols.pick(+big: Bool, +enc: Enc, +esi0: U32, +n: U32) -> List<&2, G.Vec>:
+  match big:
+    case True{}:
+      match enc:
+        case Enc{+k, t, +sp, +tr}:
+          F.Flat.encode_tree(sp, k, tr, esi0, n)
+    case False{}:
+      symbols.go(U32.to_nat(n), (esi0 + n - 1 : U32), enc, Nil{})
+
+def symbols.size(+enc: Enc) -> U32:
+  match enc:
+    case Enc{k, t, +sp, tr}:
+      R.L(sp)
+
 def Codec.symbols(+enc: Enc, +esi0: U32, +n: U32) -> List<&2, G.Vec>:
-  symbols.go(U32.to_nat(n), (esi0 + n - 1 : U32), enc, Nil{})
+  symbols.pick(U32.is_ge((n * 40 : U32), symbols.size(enc)), enc, esi0, n)
 
 # ---------------------------------------------------------------------------
 # Decoder
 # ---------------------------------------------------------------------------
 
-# source symbols ESI k-1 .. 0 re-encoded from the intermediate symbols (prepending => ascending)
-def out.go(n: Nat, +i: U32, +sp: T.SP, +tr: C.ITree, acc: List<&2, G.Vec>) -> List<&2, G.Vec>:
-  match n:
-    case 0n:
-      acc
-    case 1n+p:
-      out.go(p, (i - 1 : U32), sp, tr, C.encode_idx(sp, tr, i) <> acc)
-
+# the K source symbols (ESI 0..K-1, ISI = ESI) are re-encoded from the intermediate symbols on a flat array (src/flat.bend)
 def dec.fin(r: Maybe<&2, List<&2, G.Vec>>, +k: U32, +sp: T.SP) -> Maybe<&2, List<&2, G.Vec>>:
   match r:
     case None{}:
       None{}
     case Some{inter}:
-      Some{out.go(U32.to_nat(k), (k - 1 : U32), sp, C.index(inter), [])}
+      Some{F.Flat.encode_list(sp, k, inter, 0, k)}
 
 def dec.solve(m: Maybe<&2, T.SP>, enough: Bool, +k: U32, +t: U32, rv: List<&2, Y.Rcv>) -> Maybe<&2, List<&2, G.Vec>>:
   match m:
