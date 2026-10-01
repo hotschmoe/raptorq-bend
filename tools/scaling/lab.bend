@@ -18,6 +18,7 @@
 #  12 shared    repair-generation shape: ONE shared read-only array S of 2^extra symbols (2^w words each) handed to the leaves of a fork
 #               tree with Array.fork; each leaf XORs `reps` pseudo-random symbols of S into its own freshly allocated output symbol
 #               (only the parallel part is timed)
+#  15 sharedclone as 12 but the handles come from Array.clone (a copy per node of the tree; no unsafe def)
 #  13 sharedlist a Data list (the shape of a Solver.Plan, 2^w elements) walked `reps` times by every leaf of a fork tree
 #  14 ownlist    as 13 but every leaf builds its own copy of the list
 import Base
@@ -343,6 +344,16 @@ def sh.tree(+d: Nat, +w: Nat, +nsym: U32, +reps: Nat, +x: U32, r: Array<U32> & A
       a b = sh.tree(p, w, nsym, reps, lcg(x), Array.fork(U32, s1)) sh.tree(p, w, nsym, reps, (x + 1 : U32), Array.fork(U32, s2))
       (a + b : U32)
 
+def sh.treec(+d: Nat, +w: Nat, +nsym: U32, +reps: Nat, +x: U32, r: Array<U32> & Array<U32>) -> U32:
+  match d:
+    case 0n:
+      (s1, s2) = r
+      sh.leaf(w, nsym, reps, x, s1)
+    case 1n+p:
+      (s1, s2) = r
+      a b = sh.treec(p, w, nsym, reps, lcg(x), Array.clone(U32, s1)) sh.treec(p, w, nsym, reps, (x + 1 : U32), Array.clone(U32, s2))
+      (a + b : U32)
+
 # S: nsym symbols of 2^w words, filled by an LCG
 def sh.fill(+n: Nat, +k: U32, +x: U32, a: Array<U32>) -> Array<U32>:
   match n:
@@ -350,6 +361,9 @@ def sh.fill(+n: Nat, +k: U32, +x: U32, a: Array<U32>) -> Array<U32>:
       a
     case 1n+p:
       sh.fill(p, U32.inc(k), lcg(x), a[k] <- x)
+
+def sh.runc(+d: Nat, +w: Nat, +reps: Nat, +ns: Nat) -> U32:
+  sh.treec(d, w, U32.from_nat(pow2n(ns)), reps, 1, Array.clone(U32, sh.fill(pow2n((ns + w : Nat)), 0, 3, Array.new(U32, (ns + w : Nat), 0))))
 
 def sh.run(+d: Nat, +w: Nat, +reps: Nat, +ns: Nat) -> U32:
   sh.tree(d, w, U32.from_nat(pow2n(ns)), reps, 1, Array.fork(U32, sh.fill(pow2n((ns + w : Nat)), 0, 3, Array.new(U32, (ns + w : Nat), 0))))
@@ -447,10 +461,21 @@ def go.run(+mode: U32, +d: Nat, +w: Nat, +reps: Nat, +extra: Nat) -> IO(Unit):
     +t1 : Nat <- IO.now()
     report(mode, d, w, reps, extra, thr, (t1 - t0 : Nat), c)
 
+def go15(+d: Nat, +w: Nat, +reps: Nat, +ns: Nat) -> IO(Unit):
+  do IO<Unit>:
+    +thr : U32 <- IO.thread_count()
+    s : Array<U32> <- IO.pure(Array<U32>, sh.fill(pow2n((ns + w : Nat)), 0, 3, Array.new(U32, (ns + w : Nat), 0)))
+    +t0 : Nat <- IO.now()
+    +c : U32 <- IO.pure(U32, sh.treec(d, w, U32.from_nat(pow2n(ns)), reps, 1, Array.clone(U32, s)))
+    +t1 : Nat <- IO.now()
+    report(15, d, w, reps, ns, thr, (t1 - t0 : Nat), c)
+
 def go(+mode: U32, +d: Nat, +w: Nat, +reps: Nat, +extra: Nat) -> IO(Unit):
   match mode:
     case 12:
       go12(d, w, reps, extra)
+    case 15:
+      go15(d, w, reps, extra)
     case _:
       go.run(mode, d, w, reps, extra)
 

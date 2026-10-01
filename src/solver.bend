@@ -1583,14 +1583,242 @@ def ap.s2(+l: U32, +nrows: U32, +npiv: U32, +ntr: U32, pivs: List<&2, PP>, trs: 
     case Pk{+wu, xs}:
       ap.s3(l, nrows, npiv, ntr, wu, U32.is_ge(wu, TAB_MIN()), pivs, trs, tail, xs)
 
+# ===========================================================================
+# 9b. The plan as a FLAT PROGRAM (docs/scaling.md): the replay of section 9 compiled into an Array<U32> of 3-word instructions
+# (w0 = kind + (c << 8), w1 = destination symbol, w2 = source symbol; symbols are numbered in the arena layout of section 9
+# without the table: rhs rows, pivots, tail rows, solution C, scratch) and run by one tail-recursive interpreter.  Tasks of a parallel apply
+# all read their own Array.clone of the program (a 0.1-0.5 ms copy; Array.fork would share one array in O(1) but is @unsafe and
+# fails the proof gate; the plan's lists would be walked by every task through shared refcounted nodes, which does not scale), each over its own word slice of every symbol.
+#   kind 0 d = s | 1 d ^= c*s | 2 d = c*s | 3 d = c*d | 4 d = 0
+# ===========================================================================
+type Em is Type:
+  Em{a: Array<U32>, n: U32}
+
+type Pm is Data:
+  Pm{l: U32, nrows: U32, npiv: U32, ntr: U32, nin: U32}
+
+type Pg is Type:
+  Pg{p: Array<U32>, m: Pm}
+
+def cn.lg(lg: List<&2, Lg>, +acc: U32) -> U32:
+  match lg:
+    case Nil{}:
+      acc
+    case Con{h, t}:
+      cn.lg(t, (acc + 1 : U32))
+
+def cn.tm(ts: List<&2, T.Term>, +acc: U32) -> U32:
+  match ts:
+    case Nil{}:
+      acc
+    case Con{h, t}:
+      cn.tm(t, (acc + 1 : U32))
+
+def cn.pivs(pvs: List<&2, PP>, +acc: U32) -> U32:
+  match pvs:
+    case Nil{}:
+      acc
+    case Con{pv, t}:
+      match pv:
+        case PP{id, pc, finv, log, oc}:
+          cn.pivs(t, cn.tm(oc, cn.lg(log, (acc + 3 : U32))))
+
+def cn.trs(trs: List<&2, TR>, +acc: U32) -> U32:
+  match trs:
+    case Nil{}:
+      acc
+    case Con{tr, t}:
+      match tr:
+        case TR{id, log}:
+          cn.trs(t, cn.lg(log, (acc + 1 : U32)))
+
+def cn.tail.add(+n: U32, +acc: U32) -> U32:
+  match n:
+    case 0:
+      (acc + 1 : U32)
+    case _:
+      (acc + n : U32)
+
+def cn.tail(tail: List<&2, TC>, +acc: U32) -> U32:
+  match tail:
+    case Nil{}:
+      acc
+    case Con{tc, t}:
+      match tc:
+        case TC{col, ts}:
+          cn.tail(t, cn.tail.add(cn.tm(ts, 0), acc))
+
+def em.put(+k: U32, +c: U32, +d: U32, +s: U32, st: Em) -> Em:
+  match st:
+    case Em{a, +n}:
+      Em{Array.set(U32, Array.set(U32, Array.set(U32, a, n, (k + U32.shln(c, 8n) : U32)), (n + 1 : U32), d), (n + 2 : U32), s), (n + 3 : U32)}
+
+def em.arr(st: Em) -> Array<U32>:
+  match st:
+    case Em{a, n}:
+      a
+
+# R_k += g * R_j for the log entries (dst symbol, pivot symbols from ar)
+def pg.log(lg: List<&2, Lg>, +dst: U32, +ar: U32, st: Em) -> Em:
+  match lg:
+    case Nil{}:
+      st
+    case Con{h, t}:
+      match h:
+        case Lg{g, j}:
+          pg.log(t, dst, ar, em.put(1, g, dst, (ar + j : U32), st))
+
+def pg.pivs(pvs: List<&2, PP>, +k: U32, +ar: U32, st: Em) -> Em:
+  match pvs:
+    case Nil{}:
+      st
+    case Con{pv, t}:
+      match pv:
+        case PP{id, pc, finv, log, oc}:
+          pg.pivs(t, (k + 1 : U32), ar, pg.log(log, (ar + k : U32), ar, em.put(0, 0, (ar + k : U32), id, st)))
+
+def pg.trs(trs: List<&2, TR>, +i: U32, +ar: U32, +rt: U32, st: Em) -> Em:
+  match trs:
+    case Nil{}:
+      st
+    case Con{tr, t}:
+      match tr:
+        case TR{id, log}:
+          pg.trs(t, (i + 1 : U32), ar, rt, pg.log(log, (rt + i : U32), ar, em.put(0, 0, (rt + i : U32), id, st)))
+
+# d ^= f * (symbol base + i) for every term
+def pg.fold(ts: List<&2, T.Term>, +dst: U32, +base: U32, st: Em) -> Em:
+  match ts:
+    case Nil{}:
+      st
+    case Con{t, rest}:
+      match t:
+        case T.Term{i, f}:
+          pg.fold(rest, dst, base, em.put(1, f, dst, (base + i : U32), st))
+
+# d = sum f * (symbol base + i) (an empty list zeroes d)
+def pg.fold0(ts: List<&2, T.Term>, +dst: U32, +base: U32, st: Em) -> Em:
+  match ts:
+    case Nil{}:
+      em.put(4, 0, dst, 0, st)
+    case Con{t, rest}:
+      match t:
+        case T.Term{i, f}:
+          pg.fold(rest, dst, base, em.put(2, f, dst, (base + i : U32), st))
+
+def pg.tail(tail: List<&2, TC>, +rt: U32, +ca: U32, st: Em) -> Em:
+  match tail:
+    case Nil{}:
+      st
+    case Con{tc, t}:
+      match tc:
+        case TC{col, ts}:
+          pg.tail(t, rt, ca, pg.fold0(ts, (ca + col : U32), rt, st))
+
+def pg.p3(pvs: List<&2, PP>, +ca: U32, st: Em) -> Em:
+  match pvs:
+    case Nil{}:
+      st
+    case Con{pv, t}:
+      match pv:
+        case PP{id, +pc, finv, log, oc}:
+          pg.p3(t, ca, em.put(3, finv, (ca + pc : U32), 0, pg.fold(oc, (ca + pc : U32), ca, em.put(0, 0, (ca + pc : U32), id, st))))
+
+def pg.build(+nrows: U32, +npiv: U32, +ntr: U32, +nin: U32, +pivs: List<&2, PP>, trs: List<&2, TR>, tail: List<&2, TC>) -> Array<U32>:
+  +ar = nrows
+  +rt = (ar + npiv : U32)
+  +ca = (rt + ntr : U32)
+  em.arr(pg.p3(pivs, ca, pg.tail(tail, rt, ca, pg.trs(trs, 0, ar, rt, pg.pivs(pivs, 0, ar, Em{Array.new(U32, clog((nin * 3 + 3 : U32)), 0), 0})))))
+
+def pg.of2(+l: U32, +nrows: U32, +npiv: U32, +ntr: U32, +pivs: List<&2, PP>, +trs: List<&2, TR>, +tail: List<&2, TC>) -> Pg:
+  +nin = cn.tail(tail, cn.trs(trs, cn.pivs(pivs, 0)))
+  Pg{pg.build(nrows, npiv, ntr, nin, pivs, trs, tail), Pm{l, nrows, npiv, ntr, nin}}
+
+# compiles a plan (sequential; ~3 instructions per elimination)
+def Solver.prog(plan: Plan) -> Pg:
+  match plan:
+    case Plan{l, nrows, npiv, ntr, pivs, trs, tail}:
+      pg.of2(l, nrows, npiv, ntr, pivs, trs, tail)
+
+# ---- interpreter -------------------------------------------------------------------------------------------------------
+type Ip is Type:
+  Ip{p: Array<U32>, a: Array<U32>}
+
+def ip.op(+k: U32, +c: U32, +tab: Bool, +w: Nat, +db: U32, +sb: U32, a: Array<U32>) -> Array<U32>:
+  match k:
+    case 0:
+      F.Flat.cp.loop(w, 0, db, sb, a)
+    case 1:
+      F.Flat.axpy(c, tab, w, db, sb, a)
+    case 2:
+      F.Flat.axset(c, tab, w, db, sb, a)
+    case 3:
+      F.Flat.scale(c, tab, w, db, a)
+    case _:
+      F.Flat.zr.loop(w, 0, db, a)
+
+def ip.exec(+x0: U32, +x1: U32, +x2: U32, +tab: Bool, +w: Nat, +wu: U32, +tb: U32, p: Array<U32>, a: Array<U32>) -> Ip:
+  Ip{p, ip.op(U32.and(x0, 255), U32.shrn(x0, 8n), tab, w, (tb + x1 * wu : U32), (tb + x2 * wu : U32), a)}
+
+def ip.f2(+i: U32, +tab: Bool, +w: Nat, +wu: U32, +tb: U32, a: Array<U32>, +x0: U32, +x1: U32, r: Array<U32> & U32) -> Ip:
+  (p, x2) = r
+  ip.exec(x0, x1, x2, tab, w, wu, tb, p, a)
+
+def ip.f1(+i: U32, +tab: Bool, +w: Nat, +wu: U32, +tb: U32, a: Array<U32>, +x0: U32, r: Array<U32> & U32) -> Ip:
+  (p, x1) = r
+  ip.f2(i, tab, w, wu, tb, a, x0, x1, Array.get(U32, p, (i + 2 : U32)))
+
+def ip.f0(+i: U32, +tab: Bool, +w: Nat, +wu: U32, +tb: U32, a: Array<U32>, r: Array<U32> & U32) -> Ip:
+  (p, x0) = r
+  ip.f1(i, tab, w, wu, tb, a, x0, Array.get(U32, p, (i + 1 : U32)))
+
+def ip.step(+i: U32, +tab: Bool, +w: Nat, +wu: U32, +tb: U32, st: Ip) -> Ip:
+  match st:
+    case Ip{p, a}:
+      ip.f0(i, tab, w, wu, tb, a, Array.get(U32, p, i))
+
+def ip.run(+n: Nat, +i: U32, +tab: Bool, +w: Nat, +wu: U32, +tb: U32, st: Ip) -> Ip:
+  match n:
+    case 0n:
+      st
+    case 1n+q:
+      ip.run(q, (i + 3 : U32), tab, w, wu, tb, ip.step(i, tab, w, wu, tb, st))
+
+# one slice (or the whole block): the arena for symbols of wu words (table, rhs rows copied in), the program run on it
+def ip.fin(st: Ip, +l: U32, +cs: U32, +wu: U32, +tb: U32) -> F.Ar:
+  match st:
+    case Ip{p, a}:
+      F.Ar{a, wu, (tb + cs * wu : U32), (tb + (cs + l) * wu : U32)}
+
+def ip.go(+m: Pm, +wu: U32, +tab: Bool, p: Array<U32>, rhs: List<&2, G.Vec>) -> F.Ar:
+  match m:
+    case Pm{l, nrows, npiv, ntr, nin}:
+      +tb = ap.tbsz(tab)
+      +nsym = (nrows + npiv + ntr + l + 1 : U32)
+      ip.fin(ip.run(U32.to_nat(nin), 0, tab, U32.to_nat(wu), wu, tb, Ip{p, F.Flat.fi_arr(F.Flat.lfill(rhs, wu, F.Fi{tb, ap.init(tab, Array.new(U32, clog((tb + nsym * wu : U32)), 0))}))}), l, (nrows + npiv + ntr : U32), wu, tb)
+
+def ip.s2(+m: Pm, p: Array<U32>, pk: Pk) -> F.Ar:
+  match pk:
+    case Pk{+wu, xs}:
+      ip.go(m, wu, U32.is_ge(wu, TAB_MIN()), p, xs)
+
+# the solved arena (as Solver.apply_arena) via the program, for the rhs symbols (or slices of them) `rhs`
+def Solver.apply_prog(+m: Pm, p: Array<U32>, rhs: List<&2, G.Vec>) -> F.Ar:
+  ip.s2(m, p, ap.peek(rhs))
+
+
 # Replays a plan on the rhs symbols (`rhs` = one symbol per row of the system the plan was made from, same order, exactly
 # Solver.plan_rows(plan) of them, all of the same length) and returns the solved ARENA (flat symbols, see src/flat.bend)
 # instead of a list of trees: C[0..l-1] are the symbols at slots ca + c * wu.  For callers that go on computing with the
-# solution (the codec re-encodes from it) without converting to trees and back.
+# solution (the codec re-encodes from it) without converting to trees and back.  The plan is compiled to a flat program first
+# (section 9b; 2 ms at K = 1000) and interpreted.
+def apply.arena2(pg: Pg, rhs: List<&2, G.Vec>) -> F.Ar:
+  match pg:
+    case Pg{p, m}:
+      Solver.apply_prog(m, p, rhs)
+
 def Solver.apply_arena(plan: Plan, rhs: List<&2, G.Vec>) -> F.Ar:
-  match plan:
-    case Plan{l, nrows, npiv, ntr, pivs, trs, tail}:
-      ap.s2(l, nrows, npiv, ntr, pivs, trs, tail, ap.peek(rhs))
+  apply.arena2(Solver.prog(plan), rhs)
 
 def apply.fin(+l: U32, ar: F.Ar) -> List<&2, G.Vec>:
   F.Flat.ar_list(l, ar)
@@ -1601,7 +1829,7 @@ def apply.fin(+l: U32, ar: F.Ar) -> List<&2, G.Vec>:
 def Solver.apply(plan: Plan, rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
   match plan:
     case Plan{+l, nrows, npiv, ntr, pivs, trs, tail}:
-      apply.fin(l, ap.s2(l, nrows, npiv, ntr, pivs, trs, tail, ap.peek(rhs)))
+      apply.fin(l, Solver.apply_arena(Plan{l, nrows, npiv, ntr, pivs, trs, tail}, rhs))
 
 # ===========================================================================
 # 10. Public solve entry points = plan + apply
@@ -1689,14 +1917,28 @@ def vjoin(a: List<&2, G.Vec>, b: List<&2, G.Vec>) -> List<&2, G.Vec>:
     case _ _:
       Nil{}
 
-# k = fork levels left, d = total slicing depth, idx = slice prefix
-def atree(+k: Nat, +d: Nat, +idx: U32, +plan: Plan, +rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
+# A leaf of the sliced apply: its word slice of every rhs symbol, the program run on its own arena, the solution slices read out
+def pa.leaf(+m: Pm, p: Array<U32>, rs: List<&2, G.Vec>) -> List<&2, G.Vec>:
+  match m:
+    case Pm{+l, nrows, npiv, ntr, nin}:
+      F.Flat.ar_list(l, Solver.apply_prog(m, p, rs))
+
+# k = fork levels left, d = total slicing depth, idx = slice prefix; r = two copies of the program.  ONE region: the
+# whole tree is a single parallel region, leaves allocate their own arena, the program is read-only shared (docs/scaling.md)
+def pa.tree(+k: Nat, +d: Nat, +idx: U32, +m: Pm, r: Array<U32> & Array<U32>, +rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
   match k:
     case 0n:
-      Solver.apply(plan, slice_syms(rhs, d, idx))
+      (p, p2) = r
+      pa.leaf(m, p, slice_syms(rhs, d, idx))
     case 1n+q:
-      a b = atree(q, d, (idx * 2 : U32), plan, rhs) atree(q, d, (idx * 2 + 1 : U32), plan, rhs)
+      (p1, p2) = r
+      a b = pa.tree(q, d, (idx * 2 : U32), m, Array.clone(U32, p1), rhs) pa.tree(q, d, (idx * 2 + 1 : U32), m, Array.clone(U32, p2), rhs)
       vjoin(a, b)
+
+def pa.run(+dd: Nat, pg: Pg, +rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
+  match pg:
+    case Pg{p, m}:
+      pa.tree(dd, dd, 0, m, Array.clone(U32, p), rhs)
 
 def sw_log(+sw: U32) -> Nat:
   match sw:
@@ -1710,7 +1952,7 @@ def apply_par2(+dd: Nat, +plan: Plan, +rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
     case 0n:
       Solver.apply(plan, rhs)
     case 1n+q:
-      atree(dd, dd, 0, plan, rhs)
+      pa.run(dd, Solver.prog(plan), rhs)
 
 # Same answer as Solver.apply, with the symbols sliced into 2^min(d, log2(words per symbol)) parts that are
 # processed in parallel (see above).  Pass the thread count's log2 (e.g. 3 or 4 for 8..16 slices) or 0.

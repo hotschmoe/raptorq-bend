@@ -297,16 +297,36 @@ def Flat.ma.loop(+n: Nat, +j: U32, +db: U32, +sb: U32, +c: U32, a: Array<U32>) -
 # Measured (tools/profile/mb_arr.bend, 64K table in its own array): 2.9 ns per word, bit-sliced SWAR 4.2, G.mulw loop 8.6.
 # ---------------------------------------------------------------------------
 
-# T[i] = G.mul(i >> 8, i & 255) for i in 0..n-1 (n = 65536)
-def Flat.tab.go(+n: Nat, +i: U32, a: Array<U32>) -> Array<U32>:
+# Row c of the table (slots c*256 .. c*256+255, which must still be zero) is built by doubling: with k_i = c * alpha^i,
+# row[2^i + b] = row[b] ^ k_i for b < 2^i (one read and one write per entry instead of a G.mul: 1.3 ms -> ~0.2 ms per table).
+def Flat.tb.f2(+dst: U32, +k: U32, r: Array<U32> & U32) -> Array<U32>:
+  (a, y) = r
+  Array.set(U32, a, dst, U32.xor(y, k))
+
+def Flat.tb.in(+n: Nat, +b: U32, +rb: U32, +h: U32, +k: U32, a: Array<U32>) -> Array<U32>:
   match n:
     case 0n:
       a
     case 1n+q:
-      Flat.tab.go(q, U32.inc(i), Array.set(U32, a, i, G.mul(U32.shrn(i, 8n), U32.and(i, 255))))
+      Flat.tb.in(q, U32.inc(b), rb, h, k, Flat.tb.f2((rb + h + b : U32), k, Array.get(U32, a, (rb + b : U32))))
 
+def Flat.tb.row(+i: Nat, +h: U32, +rb: U32, +k: U32, a: Array<U32>) -> Array<U32>:
+  match i:
+    case 0n:
+      a
+    case 1n+q:
+      Flat.tb.row(q, (h * 2 : U32), rb, G.xtime(k), Flat.tb.in(U32.to_nat(h), 0, rb, h, k, a))
+
+def Flat.tb.all(+n: Nat, +c: U32, a: Array<U32>) -> Array<U32>:
+  match n:
+    case 0n:
+      a
+    case 1n+q:
+      Flat.tb.all(q, U32.inc(c), Flat.tb.row(8n, 1, U32.shln(c, 8n), c, a))
+
+# T[(c << 8) | b] = c * b at slots 0..65535 (the slots must be zero on entry: a fresh arena)
 def Flat.table(a: Array<U32>) -> Array<U32>:
-  Flat.tab.go(65536n, 0, a)
+  Flat.tb.all(256n, 0, a)
 
 # d = c * s  (c8 = c << 8)
 def Flat.ts.g4(+j: U32, +db: U32, +acc: U32, r: Array<U32> & U32) -> Array<U32>:
