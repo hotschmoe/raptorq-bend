@@ -11,6 +11,9 @@ import ../../src/gf256.bend as G
 import ../../src/types.bend as Y
 import ../../src/raptorq.bend as Q
 
+type Tm is Data:
+  Tm{a: Nat, b: Nat}
+
 def lcg(+x: U32) -> U32:
   (x * 1664525 + 1013904223 : U32)
 
@@ -127,7 +130,17 @@ def decode_phase(+e: Q.Enc, +k: U32, +t: U32, +n: U32, +thr: U32, +setup: Nat, +
     IO.print("decode ok=" ++ U32.show(ok) ++ " symbols=" ++ U32.show(nres))
     report(k, t, n, thr, setup, rep, repw, (t3 - t2 : Nat), ok)
 
-def enc_phase(m: Maybe<&2, Q.Enc>, +k: U32, +t: U32, +n: U32, +thr: U32, +t0: Nat, src: List<&2, G.Vec>) -> IO(Unit):
+# mode 1 reports the flat API's setup / repair times instead of the tree API's (the tree ones are still measured)
+def pick_phase(+mode: U32, fl: Tm, +e: Q.Enc, +k: U32, +t: U32, +n: U32, +thr: U32, +setup: Nat, +rep: Nat, +repw: Nat, src: List<&2, G.Vec>) -> IO(Unit):
+  match mode:
+    case 1:
+      match fl:
+        case Tm{a, b}:
+          decode_phase(e, k, t, n, thr, a, b, 0n, src)
+    case _:
+      decode_phase(e, k, t, n, thr, setup, rep, repw, src)
+
+def enc_phase(m: Maybe<&2, Q.Enc>, +k: U32, +t: U32, +n: U32, +thr: U32, +t0: Nat, +fl: Tm, +mode: U32, src: List<&2, G.Vec>) -> IO(Unit):
   match m:
     case None{}:
       IO.die(Unit, 1, "FAIL: encoder returned None")
@@ -140,27 +153,69 @@ def enc_phase(m: Maybe<&2, Q.Enc>, +k: U32, +t: U32, +n: U32, +thr: U32, +t0: Na
         +t2 : Nat <- IO.now()
         IO.print("repair symbols " ++ U32.show(nrs) ++ " checksum " ++ U32.show(fold_syms(rs, 0)))
         +t3 : Nat <- IO.now()
-        decode_phase(e, k, t, n, thr, (t1 - t0 : Nat), (t2 - t1 : Nat), (t3 - t2 : Nat), src)
+        pick_phase(mode, fl, e, k, t, n, thr, (t1 - t0 : Nat), (t2 - t1 : Nat), (t3 - t2 : Nat), src)
 
-def bench(+k: U32, +t: U32, +n: U32) -> IO(Unit):
+# mode 1: setup and repair are measured on the LINEAR FLAT encoder (Codec.encoder_flat_auto + symbols_flat, result summed in place);
+# the decode phase still needs received symbols, which are built (untimed) with the Data encoder.
+def flat_c(g: Q.GenF, +n: U32, +t0: Nat, +t1: Nat) -> IO(Tm):
+  match g:
+    case Q.GenF{e, o}:
+      do IO<Tm>:
+        +c : U32 <- IO.pure(U32, Q.Codec.out_sum(n, o))
+        +t2 : Nat <- IO.now()
+        IO.pure(Tm, Tm{(t1 - t0 : Nat), (t2 - t1 : Nat)})
+
+def flat_b(g: Q.GenF, +k: U32, +n: U32, +t0: Nat) -> IO(Tm):
+  match g:
+    case Q.GenF{e, o}:
+      do IO<Tm>:
+        +c : U32 <- IO.pure(U32, Q.Codec.out_sum(1, o))
+        +t1 : Nat <- IO.now()
+        g2 : Q.GenF <- IO.pure(Q.GenF, Q.Codec.symbols_flat(e, k, n))
+        flat_c(g2, n, t0, t1)
+
+def flat_a(m: Q.MbF, +k: U32, +n: U32, +t0: Nat) -> IO(Tm):
+  match m:
+    case Q.NoF{}:
+      IO.die(Tm, 1, "FAIL: encoder_flat returned NoF")
+    case Q.SomeF{e}:
+      flat_b(Q.Codec.symbols_flat(e, k, 1), k, n, t0)
+
+def flat_phase(+k: U32, +t: U32, +n: U32, src: List<&2, G.Vec>) -> IO(Tm):
+  do IO<Tm>:
+    +t0 : Nat <- IO.now()
+    m : Q.MbF <- Q.Codec.encoder_flat_auto(k, t, {src : List<&2, G.Vec>})
+    flat_a(m, k, n, t0)
+
+def flat_phase_mode(+mode: U32, +k: U32, +t: U32, +n: U32, src: List<&2, G.Vec>) -> IO(Tm):
+  match mode:
+    case 1:
+      flat_phase(k, t, n, src)
+    case _:
+      IO.pure(Tm, Tm{0n, 0n})
+
+def bench(+k: U32, +t: U32, +n: U32, +mode: U32) -> IO(Unit):
   +data = bytes.go(U32.to_nat((k * t : U32)), (k * 65536 + t : U32), [])
   +src = Q.Codec.split(data, t)
   do IO<Unit>:
     +thr : U32 <- IO.thread_count()
     IO.print("source built, checksum " ++ U32.show(fold_syms(src, 0)))
+    +fl : Tm <- flat_phase_mode(mode, k, t, n, src)
     +t0 : Nat <- IO.now()
     m : Maybe<&2, Q.Enc> <- Q.Codec.encoder_auto(k, t, {src : List<&2, G.Vec>})
-    enc_phase(m, k, t, n, thr, t0, src)
+    enc_phase(m, k, t, n, thr, t0, fl, mode, src)
 
 def rd(s: String, d: U32) -> U32:
   Maybe.default(&2, U32, U32.read(s), d)
 
 def run_args(args: List<String>) -> IO(Unit):
   match args:
+    case prog <> ks <> ts <> ns <> ms <> rest:
+      bench(rd(ks, 1000), rd(ts, 16), rd(ns, 1000), rd(ms, 0))
     case prog <> ks <> ts <> ns <> rest:
-      bench(rd(ks, 1000), rd(ts, 16), rd(ns, 1000))
+      bench(rd(ks, 1000), rd(ts, 16), rd(ns, 1000), 0)
     case _:
-      IO.die(Unit, 1, "usage: bench [--threads N] -- K T N")
+      IO.die(Unit, 1, "usage: bench [--threads N] -- K T N [mode: 0 tree API, 1 linear flat API]")
 
 def main() -> IO(Unit):
   do IO<Unit>:

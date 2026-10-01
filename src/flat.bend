@@ -654,3 +654,169 @@ def Flat.dcap(+d: U32, +wu: U32) -> Nat:
 def Flat.encode_tree_par(+d: U32, +sp: T.SP, +k: U32, +tr: C.ITree, +esi0: U32, +n: U32) -> List<&2, G.Vec>:
   +dd = Flat.dcap(d, Flat.words_of_tree(tr))
   Flat.ets.tree(dd, dd, 0, sp, k, tr, esi0, n)
+
+# ---------------------------------------------------------------------------
+# LINEAR flat encoder state (new API, docs/codec.md): the solved symbols stay in their arena(s) between calls, encoding symbols are
+# generated into fresh flat arrays, nothing is converted to `Vec` trees unless asked.
+#   Ars  the solved arena of a block: one Ar, or (sliced solve) a binary tree of Ars, leaf i holding word slice i of every intermediate symbol
+#   Fo   encoding symbols out: the same tree shape, leaf = Array<U32> with symbol i's slice at slots i * wu
+#   Gn   generate: (the arenas handed back, the output)
+# ---------------------------------------------------------------------------
+type Ars is Type:
+  Ar1{ar: Ar}
+  ArN{l: Ars, r: Ars}
+
+type Fo is Type:
+  Fo1{o: Array<U32>, wu: U32}
+  FoN{l: Fo, r: Fo}
+
+type Gn is Type:
+  Gn{a: Ars, o: Fo}
+
+type P2 is Type:
+  P2{s: Array<U32>, o: Array<U32>}
+
+# o[ob + j] = s[sb + j] for j < n (two arrays: s read, o written)
+def Flat.c2.f(+j: U32, +ob: U32, rs: Array<U32> & U32, o: Array<U32>) -> P2:
+  (s, x) = rs
+  P2{s, Array.set(U32, o, (ob + j : U32), x)}
+
+def Flat.c2.step(+j: U32, +ob: U32, +sb: U32, p: P2) -> P2:
+  match p:
+    case P2{s, o}:
+      Flat.c2.f(j, ob, Array.get(U32, s, (sb + j : U32)), o)
+
+def Flat.c2.loop(+n: Nat, +j: U32, +ob: U32, +sb: U32, p: P2) -> P2:
+  match n:
+    case 0n:
+      p
+    case 1n+q:
+      Flat.c2.loop(q, U32.inc(j), ob, sb, Flat.c2.step(j, ob, sb, p))
+
+# o[ob + j] ^= s[sb + j]
+def Flat.x2.f2(+j: U32, +ob: U32, +x: U32, ro: Array<U32> & U32, s: Array<U32>) -> P2:
+  (o, y) = ro
+  P2{s, Array.set(U32, o, (ob + j : U32), U32.xor(y, x))}
+
+def Flat.x2.f1(+j: U32, +ob: U32, rs: Array<U32> & U32, o: Array<U32>) -> P2:
+  (s, x) = rs
+  Flat.x2.f2(j, ob, x, Array.get(U32, o, (ob + j : U32)), s)
+
+def Flat.x2.step(+j: U32, +ob: U32, +sb: U32, p: P2) -> P2:
+  match p:
+    case P2{s, o}:
+      Flat.x2.f1(j, ob, Array.get(U32, s, (sb + j : U32)), o)
+
+def Flat.x2.loop(+n: Nat, +j: U32, +ob: U32, +sb: U32, p: P2) -> P2:
+  match n:
+    case 0n:
+      p
+    case 1n+q:
+      Flat.x2.loop(q, U32.inc(j), ob, sb, Flat.x2.step(j, ob, sb, p))
+
+# o[ob..] = XOR of the symbols (cb + i * wu..) of s over the terms (all coefficients are 1); the output slice starts zero
+def Flat.g2.rest(ts: List<&2, Y.Term>, +w: Nat, +ob: U32, +cb: U32, +wu: U32, p: P2) -> P2:
+  match ts:
+    case Nil{}:
+      p
+    case Con{t, rest}:
+      match t:
+        case Y.Term{i, f}:
+          Flat.g2.rest(rest, w, ob, cb, wu, Flat.x2.loop(w, 0, ob, (cb + i * wu : U32), p))
+
+def Flat.g2.one(ts: List<&2, Y.Term>, +w: Nat, +ob: U32, +cb: U32, +wu: U32, p: P2) -> P2:
+  match ts:
+    case Nil{}:
+      p
+    case Con{t, rest}:
+      match t:
+        case Y.Term{i, f}:
+          Flat.g2.rest(rest, w, ob, cb, wu, Flat.c2.loop(w, 0, ob, (cb + i * wu : U32), p))
+
+# symbols i = 0..n-1 of the output are the encoding symbols esi0 + i
+def Flat.g2.run(+n: Nat, +i: U32, +esi0: U32, +k: U32, +sp: T.SP, +w: Nat, +wu: U32, +cb: U32, p: P2) -> P2:
+  match n:
+    case 0n:
+      p
+    case 1n+q:
+      Flat.g2.run(q, U32.inc(i), esi0, k, sp, w, wu, cb, Flat.g2.one(C.lt_terms(sp, C.isi_of((esi0 + i : U32), k, R.Kp(sp))), w, (i * wu : U32), cb, wu, p))
+
+def Flat.g2.fin(p: P2, +wu: U32, +ca: U32, +sc: U32) -> Gn:
+  match p:
+    case P2{s, o}:
+      Gn{Ar1{Ar{s, wu, ca, sc}}, Fo1{o, wu}}
+
+# one leaf: n encoding symbols esi0.. of the slice held by this arena, into a fresh output array
+def Flat.g2.leaf(+n: U32, +esi0: U32, +k: U32, +sp: T.SP, ar: Ar) -> Gn:
+  match ar:
+    case Ar{a, +wu, +ca, +sc}:
+      Flat.g2.fin(Flat.g2.run(U32.to_nat(n), 0, esi0, k, sp, U32.to_nat(wu), wu, ca, P2{a, Array.new(U32, G.Vec.clog((n * wu : U32)), 0)}), wu, ca, sc)
+
+def Flat.gt.join(x: Gn, y: Gn) -> Gn:
+  match x y:
+    case Gn{xa, xo} Gn{ya, yo}:
+      Gn{ArN{xa, ya}, FoN{xo, yo}}
+
+# ONE fork tree over the slice arenas (no tree below: the leaf is flat)
+def Flat.gt(+n: U32, +esi0: U32, +k: U32, +sp: T.SP, a: Ars) -> Gn:
+  match a:
+    case Ar1{ar}:
+      Flat.g2.leaf(n, esi0, k, sp, ar)
+    case ArN{l, r}:
+      x y = Flat.gt(n, esi0, k, sp, l) Flat.gt(n, esi0, k, sp, r)
+      Flat.gt.join(x, y)
+
+# encoding symbols esi0 .. esi0 + n - 1 (external ESIs) of the block held by `a`; the arenas come back inside the result
+def Flat.generate(+sp: T.SP, +k: U32, a: Ars, +esi0: U32, +n: U32) -> Gn:
+  Flat.gt(n, esi0, k, sp, a)
+
+# ---- reading an Fo: symbols as Vec trees (joined across slices, in parallel), a checksum, one word ---------------------------------
+def Flat.fo_vecs(+n: U32, fo: Fo) -> List<&2, G.Vec>:
+  match fo:
+    case Fo1{o, wu}:
+      Flat.sym_list(n, 0, wu, o)
+    case FoN{l, r}:
+      a b = Flat.fo_vecs(n, l) Flat.fo_vecs(n, r)
+      Flat.vjoin(a, b)
+
+type Sm is Type:
+  Sm{a: Array<U32>, acc: U32}
+
+def Flat.sum.f(+acc: U32, r: Array<U32> & U32) -> Sm:
+  (a, x) = r
+  Sm{a, (acc * 31 + x : U32)}
+
+def Flat.sum.step(+j: U32, st: Sm) -> Sm:
+  match st:
+    case Sm{a, +acc}:
+      Flat.sum.f(acc, Array.get(U32, a, j))
+
+def Flat.sum.loop(+m: Nat, +j: U32, st: Sm) -> Sm:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      Flat.sum.loop(q, U32.inc(j), Flat.sum.step(j, st))
+
+def Flat.sum.fin(st: Sm) -> U32:
+  match st:
+    case Sm{a, acc}:
+      acc
+
+# checksum of the n symbols (sum over slices of a word hash per slice; for tests and benchmarks, not a stable format)
+def Flat.fo_sum(+n: U32, fo: Fo) -> U32:
+  match fo:
+    case Fo1{o, +wu}:
+      Flat.sum.fin(Flat.sum.loop(U32.to_nat((n * wu : U32)), 0, Sm{o, 0}))
+    case FoN{l, r}:
+      a b = Flat.fo_sum(n, l) Flat.fo_sum(n, r)
+      (a + b : U32)
+
+# the l solved intermediate symbols of an Ars as Vec trees (joined across slices)
+def Flat.ars_list(+l: U32, a: Ars) -> List<&2, G.Vec>:
+  match a:
+    case Ar1{ar}:
+      Flat.ar_list(l, ar)
+    case ArN{x, y}:
+      p q = Flat.ars_list(l, x) Flat.ars_list(l, y)
+      Flat.vjoin(p, q)

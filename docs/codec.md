@@ -1,7 +1,7 @@
 # End-to-end codec (RFC 6330 5.3 / 5.4) -- `src/raptorq.bend`, `src/raptorq_demo.bend`
 
-`import ../src/raptorq.bend as Q`, then `Q.Codec.split(..)` etc. Single source block only (RFC 4.4.1.2: K = ceil(F/T),
-1 <= K <= 56403); multi-block partitioning (Z > 1, 4.4.1.2 / 4.3 sub-blocking, OTI/payload-id framing) is out of scope.
+`import ../src/raptorq.bend as Q`, then `Q.Codec.split(..)` etc. One source block (RFC 4.4.1.2: K = ceil(F/T),
+1 <= K <= 56403) per call; whole objects with Z > 1 blocks, sub-blocks and the OTI are `src/blocks.bend` on top of this API (`docs/multiblock.md`).
 `Sym` = `G.Vec` (packed words, see gf256.md); `T` is the true symbol size in octets.
 
 ## API
@@ -14,6 +14,20 @@
 | `Codec.symbol(enc, esi) -> Sym` / `Codec.repair` | encoding symbol for the external ESI: `ESI < K` -> ISI = ESI (the source symbol, systematic), `ESI >= K` -> ISI = ESI + K' - K (repair). `repair` is an alias. O(d log L) per symbol, any ESI order, any number of times |
 | `Codec.symbols(enc, esi0, n) -> List<&2,Sym>` | n consecutive encoding symbols |
 | `Codec.decode(k, t, received: List<&2,Y.Rcv>) -> Maybe<&2,List<&2,Sym>>` | `Rcv{esi, sym}` in any order. `fixed ++ received_rows` -> `Solver.solve_p(L, P, ..)` -> source symbols ESI 0..K-1. `None` if fewer than K symbols, invalid K/T, or rank deficient (RFC 5.4.2 failure) |
+
+### Linear flat encoder (new, additive; `src/flat.bend` + `src/raptorq.bend`)
+`Enc` is `Data`, so it cannot hold an `Array`: every `Codec.symbols` call copies the intermediate symbols from trees into an arena and reads each result
+out as trees (28 ms of 30 at K = 1000, T = 1024, N = 1000; the XOR loops are 2.5 ms). The linear API keeps the solved arena(s):
+
+| def | meaning |
+|---|---|
+| `Codec.encoder_flat(d, k, t, source) -> MbF` | like `Codec.encoder` (same `None` conditions -> `NoF{}`), result `SomeF{e: EncF}`; the solve's symbol side is sliced into 2^min(d, log2 words) word slices run in ONE parallel region (`d = 0`: sequential). `EncF` is a linear `Type` (it holds arrays): every call hands it back |
+| `Codec.encode_with_plan_flat(d, k, t, plan, source)` | with a plan from `Codec.encoder_plan(k)` |
+| `Codec.encoder_flat_auto(k, t, source)`, `encode_with_plan_flat_auto` | IO: `d` from `IO.thread_count` and the symbol size (`Solver.auto_depth`) |
+| `Codec.symbols_flat(e: EncF, esi0, n) -> GenF{e, out}` | n encoding symbols (same ESIs as `Codec.symbols`) generated straight from the arenas into fresh flat arrays (one fork tree over the slices); `out: F.Fo` has one array per slice, symbol i of a slice at slots i * (words of the slice); the encoder comes back in `e` and can be used again |
+| `Codec.out_vecs(n, out) -> List<Sym>` | the symbols as `Vec` trees (identical to `Codec.symbols`), `Codec.out_sum(n, out)`: a checksum without leaving the arrays; `Codec.encf_inter(e)`: the L intermediate symbols as trees |
+Tested bit for bit against `Codec.symbols` (`tests/codec_flat_test.bend`: d = 0, 1, 3, plan reuse, auto, odd word counts, second call on the returned encoder).
+K = 1000, T = 1024, N = 1000, one thread: repair 16 -> 2 ms (Rust 1.3), setup 63 -> 60 ms (no read-out of the solution into trees); `docs/benchmarks.md`.
 
 Design notes
 * Flat symbol path (`src/flat.bend`, docs/profile.md R1): `Codec.symbols` (for more than about L/40 symbols; fewer take the per-symbol

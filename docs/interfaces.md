@@ -64,6 +64,17 @@ Single source block, 1 <= K <= 56403. `Enc{k, t, sp, tr}` holds the parameters a
   `Codec.decode_with_plan(k, t, plan, syms) -> Maybe<&2, List<G.Vec>>` (+ `encode_with_plan_auto`, `decode_with_plan_auto` in IO).
   A plan does not depend on T or the data; `None` when the plan does not fit K / the symbol count or T = 0.
 
+## Blocks (`src/blocks.bend`, RFC 3.3 / 4.3 / 4.4; see `docs/multiblock.md`)
+Whole objects of Z >= 1 source blocks on top of `Codec`. `Oti{f, t, z, n, al}`, `Part{il, ish, jl, js}`, `Lay{kt, kl, ks, zl, zs}`, `Pkt{sbn, esi, sym}`, `Obj{oti, lay, encs}` are Data.
+`w` = number of workers of the block tree (`IO.thread_count()`; any value, 1 = sequential).
+- `Blocks.partition(i, j) -> Part`, `Blocks.layout(oti) -> Lay`, `Blocks.block_k(lay, sbn) -> U32`, `Blocks.num_blocks(lay)`, `Blocks.kl(ws, al, t, n) -> U32` (K_L of RFC 4.3)
+- `Blocks.params(f, p, al, ws, ss) -> Maybe<Oti>` (RFC 4.3), `Blocks.oti(f, t, z, n, al) -> Maybe<Oti>` / `Blocks.valid(oti)`, `Blocks.oti_bytes(oti) -> List<U32>` (12 octets),
+  `Blocks.oti_parse(bytes) -> Maybe<Oti>`, `Blocks.payload_id(sbn, esi) -> U32`
+- `Blocks.split_object(oti, bytes) -> List<List<Sym>>` / `Blocks.join_object(oti, blocks) -> bytes` (source symbols per block, sub-block interleave)
+- `Blocks.encode_object(w, oti, bytes) -> Maybe<Obj>`, `Blocks.encode_syms(w, oti, src: List<List<Sym>>) -> Maybe<Obj>`, `Blocks.symbol(obj, sbn, esi) -> Maybe<Sym>`,
+  `Blocks.repair(w, obj, n) -> List<List<Sym>>` (n repair symbols per block), `Blocks.encode_repair(w, oti, n, src) -> Maybe<List<List<Sym>>>` (fused, flat arena, no `Obj`)
+- `Blocks.decode_object(w, oti, pkts: List<Pkt>) -> Maybe<bytes>`, `Blocks.decode_syms(w, oti, pkts) -> Maybe<List<List<Sym>>>`
+
 ## Tests
 Python generators in `tools/` emit Bend fixture files from `tests/vectors/*.txt`. `bend tests/<x>_test.bend` exits non-zero on
 failure; `scripts/test_all.sh` runs all of them.

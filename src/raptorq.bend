@@ -608,3 +608,115 @@ def dwp.go_auto(m: Maybe<&2, T.SP>, tok: Bool, +k: U32, +t: U32, +plan: S.Plan, 
 
 def Codec.decode_with_plan_auto(+k: U32, +t: U32, plan: S.Plan, syms: List<&2, G.Vec>) -> IO(Maybe<&2, List<&2, G.Vec>>):
   dwp.go_auto(R.params(k), U32.is_gt(t, 0), k, t, plan, syms)
+
+# ---------------------------------------------------------------------------
+# LINEAR flat encoder (new API; the `Enc` above is `Data`, so it cannot hold an Array and every `Codec.symbols` call copies the
+# intermediate symbols from trees into an arena and reads every result out as trees).  `EncF` keeps the SOLVED arena(s) -- the
+# solve can be sliced over 2^d word ranges, then the arenas are a tree (F.Ars) -- and `Codec.symbols_flat` generates encoding symbols
+# straight from them into fresh flat arrays (one fork tree over the slices when sliced).  `EncF` is a linear `Type`: every call that
+# uses it hands it back.  Nothing is converted to `Vec` unless asked (`Codec.out_vecs`).  docs/codec.md.
+# ---------------------------------------------------------------------------
+type EncF is Type:
+  EncF{k: U32, t: U32, sp: T.SP, ars: F.Ars}
+
+type MbF is Type:
+  NoF{}
+  SomeF{e: EncF}
+
+type GenF is Type:
+  GenF{e: EncF, out: F.Fo}
+
+def encf.fin(pl: Maybe<&2, S.Plan>, +d: U32, rhs: List<&2, G.Vec>, +k: U32, +t: U32, +sp: T.SP) -> MbF:
+  match pl:
+    case None{}:
+      NoF{}
+    case Some{plan}:
+      SomeF{EncF{k, t, sp, S.Solver.apply_ars(d, plan, rhs)}}
+
+def encf.solve(m: Maybe<&2, T.SP>, ok: Bool, +d: U32, +k: U32, +t: U32, source: List<&2, G.Vec>) -> MbF:
+  match m:
+    case None{}:
+      NoF{}
+    case Some{+sp}:
+      match ok:
+        case False{}:
+          NoF{}
+        case True{}:
+          +rows = append_rows(C.fixed(sp, t), C.source_rows(sp, source))
+          encf.fin(S.Solver.plan(R.L(sp), R.P(sp), rows), d, S.rows_rhs(rows, Nil{}), k, t, sp)
+
+# Like Codec.encoder (solver runs once, same None conditions -> NoF), but the result is an EncF.  d = slicing depth (2^d word slices,
+# solved in ONE parallel region; 0 = sequential; capped at log2(words per symbol)).
+def Codec.encoder_flat(+d: U32, +k: U32, +t: U32, source: List<&2, G.Vec>) -> MbF:
+  +src = source
+  +ok = band(U32.is_eq(len_sym(src, 0), k), band(U32.is_gt(k, 0), U32.is_gt(t, 0)))
+  encf.solve(R.params(k), ok, d, k, t, src)
+
+def encfp.fin(ok: Bool, plan: S.Plan, +d: U32, rhs: List<&2, G.Vec>, +k: U32, +t: U32, +sp: T.SP) -> MbF:
+  match ok:
+    case True{}:
+      SomeF{EncF{k, t, sp, S.Solver.apply_ars(d, plan, rhs)}}
+    case False{}:
+      NoF{}
+
+def encfp.go(m: Maybe<&2, T.SP>, tok: Bool, +d: U32, +k: U32, +t: U32, +plan: S.Plan, source: List<&2, G.Vec>) -> MbF:
+  match m:
+    case None{}:
+      NoF{}
+    case Some{+sp}:
+      match tok:
+        case False{}:
+          NoF{}
+        case True{}:
+          +rhs = wp.rhs(sp, k, t, source)
+          encfp.fin(wp.ok(plan, rhs, R.L(sp)), plan, d, rhs, k, t, sp)
+
+# with a plan from Codec.encoder_plan(k): only the symbol side
+def Codec.encode_with_plan_flat(+d: U32, +k: U32, +t: U32, +plan: S.Plan, source: List<&2, G.Vec>) -> MbF:
+  +src = source
+  encfp.go(R.params(k), band(U32.is_eq(len_sym(src, 0), k), U32.is_gt(t, 0)), d, k, t, plan, src)
+
+# slicing depth from the thread count of the running binary and the symbol size (Solver.auto_depth)
+def encf.auto(m: Maybe<&2, T.SP>, +t: U32, +th: U32) -> U32:
+  match m:
+    case None{}:
+      0
+    case Some{sp}:
+      S.Solver.auto_depth(th, U32.shrn((t + 3 : U32), 2n), R.L(sp))
+
+def Codec.encoder_flat_auto(+k: U32, +t: U32, source: List<&2, G.Vec>) -> IO(MbF):
+  +src = source
+  do IO<MbF>:
+    th : U32 <- IO.thread_count()
+    IO.pure(MbF, Codec.encoder_flat(encf.auto(R.params(k), t, th), k, t, src))
+
+def Codec.encode_with_plan_flat_auto(+k: U32, +t: U32, plan: S.Plan, source: List<&2, G.Vec>) -> IO(MbF):
+  +src = source
+  do IO<MbF>:
+    th : U32 <- IO.thread_count()
+    IO.pure(MbF, Codec.encode_with_plan_flat(encf.auto(R.params(k), t, th), k, t, plan, src))
+
+def symf.fin(g: F.Gn, +k: U32, +t: U32, +sp: T.SP) -> GenF:
+  match g:
+    case F.Gn{a, o}:
+      GenF{EncF{k, t, sp, a}, o}
+
+# n encoding symbols for ESI esi0.. (RFC 5.3.4, like Codec.symbols) as flat arrays: `out` has one array per slice, symbol i of a slice at
+# slots i * (words of the slice).  The encoder is handed back in the result and can be used again.
+def Codec.symbols_flat(e: EncF, +esi0: U32, +n: U32) -> GenF:
+  match e:
+    case EncF{+k, +t, +sp, ars}:
+      symf.fin(F.Flat.generate(sp, k, ars, esi0, n), k, t, sp)
+
+# the n symbols of an `out` as Vec trees (same values and shape as Codec.symbols), and a cheap checksum over all their words
+def Codec.out_vecs(+n: U32, out: F.Fo) -> List<&2, G.Vec>:
+  F.Flat.fo_vecs(n, out)
+
+def Codec.out_sum(+n: U32, out: F.Fo) -> U32:
+  F.Flat.fo_sum(n, out)
+
+# the L intermediate symbols of an EncF as Vec trees (consumes it)
+def Codec.encf_inter(e: EncF) -> List<&2, G.Vec>:
+  match e:
+    case EncF{k, t, +sp, ars}:
+      F.Flat.ars_list(R.L(sp), ars)

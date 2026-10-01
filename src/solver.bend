@@ -1912,6 +1912,23 @@ def pa.run(+dd: Nat, pg: Pg, +rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
     case Pg{p, m}:
       pa.tree(dd, dd, 0, m, Array.clone(U32, p), rhs)
 
+# The same sliced replay, but the slice arenas are KEPT (a tree F.Ars, leaf i = word slice i of every symbol): the linear flat
+# encoder (Codec.encoder_flat) generates encoding symbols straight from them.
+def pa.treeA(+k: Nat, +d: Nat, +idx: U32, +m: Pm, r: Array<U32> & Array<U32>, +rhs: List<&2, G.Vec>) -> F.Ars:
+  match k:
+    case 0n:
+      (p, p2) = r
+      F.Ar1{Solver.apply_prog(m, p, slice_syms(rhs, d, idx))}
+    case 1n+q:
+      (p1, p2) = r
+      a b = pa.treeA(q, d, (idx * 2 : U32), m, Array.clone(U32, p1), rhs) pa.treeA(q, d, (idx * 2 + 1 : U32), m, Array.clone(U32, p2), rhs)
+      F.ArN{a, b}
+
+def pa.runA(+dd: Nat, pg: Pg, +rhs: List<&2, G.Vec>) -> F.Ars:
+  match pg:
+    case Pg{p, m}:
+      pa.treeA(dd, dd, 0, m, Array.clone(U32, p), rhs)
+
 def sw_log(+sw: U32) -> Nat:
   match sw:
     case 0:
@@ -1930,6 +1947,19 @@ def apply_par2(+dd: Nat, +plan: Plan, +rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
 # processed in parallel (see above).  Pass the thread count's log2 (e.g. 3 or 4 for 8..16 slices) or 0.
 def Solver.apply_par(+d: U32, +plan: Plan, +rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
   apply_par2(cap(U32.to_nat(d), sw_log(rhs_sw(rhs))), plan, rhs)
+
+# the solved arenas of 2^min(d, log2 words) word slices (d = 0: one arena), plan compiled once; consumed by Flat.generate / Flat.ars_list
+def apply_ars2(+dd: Nat, pg: Pg, +rhs: List<&2, G.Vec>) -> F.Ars:
+  match dd:
+    case 0n:
+      match pg:
+        case Pg{p, m}:
+          F.Ar1{Solver.apply_prog(m, p, rhs)}
+    case _:
+      pa.runA(dd, pg, rhs)
+
+def Solver.apply_ars(+d: U32, plan: Plan, +rhs: List<&2, G.Vec>) -> F.Ars:
+  apply_ars2(cap(U32.to_nat(d), sw_log(rhs_sw(rhs))), Solver.prog(plan), rhs)
 
 def solve_par.go(pl: Maybe<&2, Plan>, +d: U32, rhs: List<&2, G.Vec>) -> Maybe<&2, List<&2, G.Vec>>:
   match pl:
