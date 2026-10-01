@@ -25,7 +25,8 @@ inactivation-decoding solver over GF(256), systematic encoder and decoder.
 
 ## Quick start
 ```sh
-# install Bend 2 (https://github.com/bendlang/bend; developed with 2.0.34) so that ~/.bend/bin/bend exists
+# install Bend 2 (https://github.com/bendlang/bend; developed with 2.0.34):
+curl -fsSL https://bend-lang.com/install.sh | sh   # installs to ~/.bend, sha256-verified
 export PATH="$HOME/.bend/bin:/usr/bin:/bin:$PATH" BEND_NO_TELEMETRY=1
 
 bend src/raptorq_demo.bend                           # encode a text, drop every 4th symbol, decode it back
