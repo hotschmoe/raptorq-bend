@@ -212,6 +212,10 @@ def Flat.bv_vec(b: Bv) -> G.Vec:
     case Bv{v, a}:
       v
 
+# n words at base (array dropped)
+def Flat.get_vec_only(a: Array<U32>, +base: U32, +n: U32) -> G.Vec:
+  Flat.bv_vec(Flat.get_vec(a, base, n))
+
 def Flat.to_vec(+n: U32, a: Array<U32>) -> G.Vec:
   Flat.bv_vec(Flat.get_vec(a, 0, n))
 
@@ -283,48 +287,145 @@ def Flat.ma.loop(+n: Nat, +j: U32, +db: U32, +sb: U32, +c: U32, a: Array<U32>) -
       Flat.ma.loop(q, U32.inc(j), db, sb, c, Flat.ma.f1(j, db, c, Array.get(U32, a, (sb + j : U32))))
 
 # ---------------------------------------------------------------------------
+# Table kernels.  The 64K-entry product table T[(c << 8) | b] = c * b (one octet per slot, built once per arena) lives at slots
+# 0..65535 of the SAME array as the symbols (one array to thread through every loop); a word product is four table lookups.
+# Measured (tools/profile/mb_arr.bend, 64K table in its own array): 2.9 ns per word, bit-sliced SWAR 4.2, G.mulw loop 8.6.
+# ---------------------------------------------------------------------------
+
+# T[i] = G.mul(i >> 8, i & 255) for i in 0..n-1 (n = 65536)
+def Flat.tab.go(+n: Nat, +i: U32, a: Array<U32>) -> Array<U32>:
+  match n:
+    case 0n:
+      a
+    case 1n+q:
+      Flat.tab.go(q, U32.inc(i), Array.set(U32, a, i, G.mul(U32.shrn(i, 8n), U32.and(i, 255))))
+
+def Flat.table(a: Array<U32>) -> Array<U32>:
+  Flat.tab.go(65536n, 0, a)
+
+# d = c * s  (c8 = c << 8)
+def Flat.ts.g4(+j: U32, +db: U32, +acc: U32, r: Array<U32> & U32) -> Array<U32>:
+  (a, p0) = r
+  Array.set(U32, a, (db + j : U32), (acc .|. p0 : U32))
+
+def Flat.ts.g3(+j: U32, +db: U32, +c8: U32, +x: U32, +acc: U32, r: Array<U32> & U32) -> Array<U32>:
+  (a, p1) = r
+  Flat.ts.g4(j, db, (acc .|. U32.shln(p1, 8n) : U32), Array.get(U32, a, (c8 + U32.and(x, 255) : U32)))
+
+def Flat.ts.g2(+j: U32, +db: U32, +c8: U32, +x: U32, +acc: U32, r: Array<U32> & U32) -> Array<U32>:
+  (a, p2) = r
+  Flat.ts.g3(j, db, c8, x, (acc .|. U32.shln(p2, 16n) : U32), Array.get(U32, a, (c8 + U32.and(U32.shrn(x, 8n), 255) : U32)))
+
+def Flat.ts.g1(+j: U32, +db: U32, +c8: U32, +x: U32, r: Array<U32> & U32) -> Array<U32>:
+  (a, p3) = r
+  Flat.ts.g2(j, db, c8, x, U32.shln(p3, 24n), Array.get(U32, a, (c8 + U32.and(U32.shrn(x, 16n), 255) : U32)))
+
+def Flat.ts.f1(+j: U32, +db: U32, +c8: U32, rs: Array<U32> & U32) -> Array<U32>:
+  (a, +x) = rs
+  Flat.ts.g1(j, db, c8, x, Array.get(U32, a, (c8 + U32.shrn(x, 24n) : U32)))
+
+def Flat.ts.loop(+n: Nat, +j: U32, +db: U32, +sb: U32, +c8: U32, a: Array<U32>) -> Array<U32>:
+  match n:
+    case 0n:
+      a
+    case 1n+q:
+      Flat.ts.loop(q, U32.inc(j), db, sb, c8, Flat.ts.f1(j, db, c8, Array.get(U32, a, (sb + j : U32))))
+
+# d ^= c * s
+def Flat.tm.g4(+j: U32, +db: U32, +y: U32, +acc: U32, r: Array<U32> & U32) -> Array<U32>:
+  (a, p0) = r
+  Array.set(U32, a, (db + j : U32), U32.xor(y, (acc .|. p0 : U32)))
+
+def Flat.tm.g3(+j: U32, +db: U32, +c8: U32, +x: U32, +y: U32, +acc: U32, r: Array<U32> & U32) -> Array<U32>:
+  (a, p1) = r
+  Flat.tm.g4(j, db, y, (acc .|. U32.shln(p1, 8n) : U32), Array.get(U32, a, (c8 + U32.and(x, 255) : U32)))
+
+def Flat.tm.g2(+j: U32, +db: U32, +c8: U32, +x: U32, +y: U32, +acc: U32, r: Array<U32> & U32) -> Array<U32>:
+  (a, p2) = r
+  Flat.tm.g3(j, db, c8, x, y, (acc .|. U32.shln(p2, 16n) : U32), Array.get(U32, a, (c8 + U32.and(U32.shrn(x, 8n), 255) : U32)))
+
+def Flat.tm.g1(+j: U32, +db: U32, +c8: U32, +x: U32, +y: U32, r: Array<U32> & U32) -> Array<U32>:
+  (a, p3) = r
+  Flat.tm.g2(j, db, c8, x, y, U32.shln(p3, 24n), Array.get(U32, a, (c8 + U32.and(U32.shrn(x, 16n), 255) : U32)))
+
+def Flat.tm.f2(+j: U32, +db: U32, +c8: U32, +x: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, +y) = rd
+  Flat.tm.g1(j, db, c8, x, y, Array.get(U32, a, (c8 + U32.shrn(x, 24n) : U32)))
+
+def Flat.tm.f1(+j: U32, +db: U32, +c8: U32, rs: Array<U32> & U32) -> Array<U32>:
+  (a, +x) = rs
+  Flat.tm.f2(j, db, c8, x, Array.get(U32, a, (db + j : U32)))
+
+def Flat.tm.loop(+n: Nat, +j: U32, +db: U32, +sb: U32, +c8: U32, a: Array<U32>) -> Array<U32>:
+  match n:
+    case 0n:
+      a
+    case 1n+q:
+      Flat.tm.loop(q, U32.inc(j), db, sb, c8, Flat.tm.f1(j, db, c8, Array.get(U32, a, (sb + j : U32))))
+
+# ---------------------------------------------------------------------------
+# Row operations on symbol slices (words at slot offsets db, sb), with or without the table (tab = False: SWAR `G.mulw`, no
+# table to build, better for symbols of a few words).  axpy: d ^= c*s; axset: d = c*s; scale: d = c*d.
+# ---------------------------------------------------------------------------
+def Flat.axpy(+c: U32, +tab: Bool, +w: Nat, +db: U32, +sb: U32, a: Array<U32>) -> Array<U32>:
+  match c:
+    case 0:
+      a
+    case 1:
+      Flat.xr.loop(w, 0, db, sb, a)
+    case _:
+      match tab:
+        case True{}:
+          Flat.tm.loop(w, 0, db, sb, U32.shln(c, 8n), a)
+        case False{}:
+          Flat.ma.loop(w, 0, db, sb, c, a)
+
+def Flat.axset(+c: U32, +tab: Bool, +w: Nat, +db: U32, +sb: U32, a: Array<U32>) -> Array<U32>:
+  match c:
+    case 0:
+      Flat.zr.loop(w, 0, db, a)
+    case 1:
+      Flat.cp.loop(w, 0, db, sb, a)
+    case _:
+      match tab:
+        case True{}:
+          Flat.ts.loop(w, 0, db, sb, U32.shln(c, 8n), a)
+        case False{}:
+          Flat.ms.loop(w, 0, db, sb, c, a)
+
+# d = c * d
+def Flat.scale(+c: U32, +tab: Bool, +w: Nat, +db: U32, a: Array<U32>) -> Array<U32>:
+  match c:
+    case 1:
+      a
+    case _:
+      Flat.axset(c, tab, w, db, db, a)
+
+# d ^= sum over terms Term{idx, f} of f * (symbol idx at slot base + idx * wu); `first` = the destination is not initialised yet:
+# the first term sets it (an empty list zeroes it)
+def Flat.fold.go(ts: List<&2, Y.Term>, +tab: Bool, +w: Nat, +wu: U32, +db: U32, +base: U32, a: Array<U32>) -> Array<U32>:
+  match ts:
+    case Nil{}:
+      a
+    case Con{t, rest}:
+      match t:
+        case Y.Term{i, f}:
+          Flat.fold.go(rest, tab, w, wu, db, base, Flat.axpy(f, tab, w, db, (base + i * wu : U32), a))
+
+def Flat.fold(ts: List<&2, Y.Term>, +tab: Bool, +w: Nat, +wu: U32, +db: U32, +base: U32, a: Array<U32>) -> Array<U32>:
+  match ts:
+    case Nil{}:
+      Flat.zr.loop(w, 0, db, a)
+    case Con{t, rest}:
+      match t:
+        case Y.Term{i, f}:
+          Flat.fold.go(rest, tab, w, wu, db, base, Flat.axset(f, tab, w, db, (base + i * wu : U32), a))
+
+# ---------------------------------------------------------------------------
 # Encoding symbols (RFC 5.3.5.3): the intermediate symbols C[0..L-1] sit at slots c*W.. of one array (W words per symbol);
 # the slice at `ob` = L*W is scratch.  An encoding symbol is the sum of C[col] over the LT/PI columns: the first term
 # initialises the scratch slice, the rest are XORed in, then the slice is read out as a Vec.
 # ---------------------------------------------------------------------------
-
-# scratch = coef * C[col]   (the first term)
-def Flat.enc.first(+coef: U32, +w: Nat, +ob: U32, +sb: U32, a: Array<U32>) -> Array<U32>:
-  match coef:
-    case 0:
-      Flat.zr.loop(w, 0, ob, a)
-    case 1:
-      Flat.cp.loop(w, 0, ob, sb, a)
-    case _:
-      Flat.ms.loop(w, 0, ob, sb, coef, a)
-
-# scratch ^= coef * C[col]
-def Flat.enc.more(+coef: U32, +w: Nat, +ob: U32, +sb: U32, a: Array<U32>) -> Array<U32>:
-  match coef:
-    case 0:
-      a
-    case 1:
-      Flat.xr.loop(w, 0, ob, sb, a)
-    case _:
-      Flat.ma.loop(w, 0, ob, sb, coef, a)
-
-def Flat.enc.go(ts: List<&2, Y.Term>, +w: Nat, +wu: U32, +ob: U32, a: Array<U32>) -> Array<U32>:
-  match ts:
-    case Nil{}:
-      a
-    case Con{t, rest}:
-      match t:
-        case Y.Term{col, coef}:
-          Flat.enc.go(rest, w, wu, ob, Flat.enc.more(coef, w, ob, (col * wu : U32), a))
-
-def Flat.enc.start(ts: List<&2, Y.Term>, +w: Nat, +wu: U32, +ob: U32, a: Array<U32>) -> Array<U32>:
-  match ts:
-    case Nil{}:
-      Flat.zr.loop(w, 0, ob, a)
-    case Con{t, rest}:
-      match t:
-        case Y.Term{col, coef}:
-          Flat.enc.go(rest, w, wu, ob, Flat.enc.first(coef, w, ob, (col * wu : U32), a))
 
 type Gs is Type:
   Gs{a: Array<U32>, acc: List<&2, G.Vec>}
@@ -337,30 +438,61 @@ def Flat.gen.fin(acc: List<&2, G.Vec>, r: Bv) -> Gs:
     case Bv{v, a}:
       Gs{a, v <> acc}
 
-def Flat.gen.one(+esi: U32, +k: U32, +sp: T.SP, +w: Nat, +wu: U32, +ob: U32, st: Gs) -> Gs:
+def Flat.gen.one(+esi: U32, +k: U32, +sp: T.SP, +w: Nat, +wu: U32, +cb: U32, +ob: U32, st: Gs) -> Gs:
   match st:
     case Gs{a, acc}:
-      Flat.gen.fin(acc, Flat.tv.go(32n, Flat.mkbv(Flat.enc.start(C.lt_terms(sp, C.isi_of(esi, k, R.Kp(sp))), w, wu, ob, a)), wu, ob, False{}))
+      Flat.gen.fin(acc, Flat.tv.go(32n, Flat.mkbv(Flat.fold(C.lt_terms(sp, C.isi_of(esi, k, R.Kp(sp))), False{}, w, wu, ob, cb, a)), wu, ob, False{}))
 
 # encoding symbols esi, esi-1, ..., esi-n+1 prepended to the accumulator (so the result is ascending)
-def Flat.gen(+n: Nat, +esi: U32, +k: U32, +sp: T.SP, +w: Nat, +wu: U32, +ob: U32, st: Gs) -> Gs:
+def Flat.gen(+n: Nat, +esi: U32, +k: U32, +sp: T.SP, +w: Nat, +wu: U32, +cb: U32, +ob: U32, st: Gs) -> Gs:
   match n:
     case 0n:
       st
     case 1n+q:
-      Flat.gen(q, (esi - 1 : U32), k, sp, w, wu, ob, Flat.gen.one(esi, k, sp, w, wu, ob, st))
+      Flat.gen(q, (esi - 1 : U32), k, sp, w, wu, cb, ob, Flat.gen.one(esi, k, sp, w, wu, cb, ob, st))
 
 def Flat.gs_list(st: Gs) -> List<&2, G.Vec>:
   match st:
     case Gs{a, acc}:
       acc
 
+# l symbols of wu words at slots ca.. -> list of Vecs (ascending), array dropped
+def Flat.sym_list.go(+n: Nat, +c: U32, +ca: U32, +wu: U32, st: Gs) -> Gs:
+  match n:
+    case 0n:
+      st
+    case 1n+q:
+      match st:
+        case Gs{a, acc}:
+          Flat.sym_list.go(q, (c - 1 : U32), ca, wu, Flat.gen.fin(acc, Flat.get_vec(a, (ca + c * wu : U32), wu)))
+
+def Flat.sym_list(+l: U32, +ca: U32, +wu: U32, a: Array<U32>) -> List<&2, G.Vec>:
+  Flat.gs_list(Flat.sym_list.go(U32.to_nat(l), (l - 1 : U32), ca, wu, Gs{a, []}))
+
+# A solved arena (Solver.apply_arena): the l intermediate symbols at slots ca.., a scratch symbol at sc
+type Ar is Type:
+  Ar{a: Array<U32>, wu: U32, ca: U32, sc: U32}
+
+def Flat.ar_list(+l: U32, ar: Ar) -> List<&2, G.Vec>:
+  match ar:
+    case Ar{a, wu, ca, sc}:
+      Flat.sym_list(l, ca, wu, a)
+
+def Flat.encode_ar.go(+n: U32, +esi0: U32, +k: U32, +sp: T.SP, ar: Ar) -> List<&2, G.Vec>:
+  match ar:
+    case Ar{a, +wu, ca, sc}:
+      Flat.gs_list(Flat.gen(U32.to_nat(n), (esi0 + n - 1 : U32), k, sp, U32.to_nat(wu), wu, ca, sc, Gs{a, []}))
+
+# n encoding symbols esi0.. from the intermediate symbols of a solved arena (consumes it)
+def Flat.encode_arena(+sp: T.SP, +k: U32, ar: Ar, +esi0: U32, +n: U32) -> List<&2, G.Vec>:
+  Flat.encode_ar.go(n, esi0, k, sp, ar)
+
 # the fresh array for L symbols of wu words (+ scratch slice), holding the position 0
 def Flat.arena(+l: U32, +wu: U32) -> Fi:
   Fi{0, Array.new(U32, G.Vec.clog(((l + 1) * wu : U32)), 0)}
 
 def Flat.run(+n: U32, +esi0: U32, +k: U32, +sp: T.SP, +wu: U32, f: Fi) -> List<&2, G.Vec>:
-  Flat.gs_list(Flat.gen(U32.to_nat(n), (esi0 + n - 1 : U32), k, sp, U32.to_nat(wu), wu, (R.L(sp) * wu : U32), Gs{Flat.fi_arr(f), []}))
+  Flat.gs_list(Flat.gen(U32.to_nat(n), (esi0 + n - 1 : U32), k, sp, U32.to_nat(wu), wu, 0, (R.L(sp) * wu : U32), Gs{Flat.fi_arr(f), []}))
 
 # one symbol of wu words at slot f.i; the next free slot comes back
 def Flat.fill1(+v: G.Vec, +wu: U32, f: Fi) -> Fi:

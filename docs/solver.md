@@ -34,6 +34,10 @@ rhs symbol per row (same order). `solve_p`, `solve`, `solve_par`, `solve_auto` a
 `solver_test` / `solver_golden_test` check apply(plan) against the known / RFC solutions and reuse one plan on two other payloads
 (T = 4 octets, and T doubled); `codec_plan_test` does the same on the golden codec vectors.
 
+## Symbol arena (apply)
+`Solver.apply` replays the plan on one flat `Array<U32>` (all rhs / pivot / tail-row / solution symbols as slices, plus a 64K product table
+for symbols of >= 8 words): see `docs/plan_apply.md` (update) and `src/flat.bend`. `Solver.apply_arena` returns the arena itself.
+
 ## Algorithm
 Dense baseline (`dg_*`, unchanged, also used for phase 2): rows are packed coefficient `Vec`s (4 octets per word, like symbols) + RHS
 symbol in a balanced tree. Step c: one pass over the tree eliminates column c from every row (full Gauss-Jordan) and, fused into the

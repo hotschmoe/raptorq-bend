@@ -101,3 +101,29 @@ the same plan, `dplan_ms` = `plan_for`, `dec1/dec2` = `decode_with_plan_auto` on
   zero symbols (the codec wrappers do).
 * Bend: `+x : T <- IO.pure(..)` instead of `+x = ..` inside `do` blocks; definition order matters in test files too; `Nat` literals
   need `n` (`9n`) where `Nat` is expected.
+
+## Update: apply on a flat symbol arena (docs/profile.md R3)
+`Solver.apply` no longer touches `Vec` trees while it replays the plan. All symbols of one apply (the rhs rows, the pivot symbols
+R_k, the tail rows R'_i, the solution C, one scratch symbol, and a 64K product table `T[(c << 8) | b] = c*b` when symbols have >= 8 words) live
+in ONE `Array<U32>` (symbol s of a region at slot base + s * words); the pivot stage, the tail rows (= the dense-row correction),
+the tail solution `C[col] = sum f R'_i`, and the forward substitution are tail-recursive loops over slices (`Flat.axpy/axset/scale`
+in `src/flat.bend`, kernels as in `tools/profile/mb_arr.bend`). The plan is unchanged (lists only, duplicable); apply builds the
+arena. The rhs rows are copied into the array once (this also removes the one-shot regression noted above: the old code fetched every rhs
+symbol from an `Array<Vec>` twice, each fetch a lazy dup). `Solver.apply_arena(plan, rhs) -> Flat.Ar` returns the solved arena
+(used by `Codec.decode*` to re-encode the K source symbols without converting to trees and back); `Solver.apply` reads the
+arena out as `Vec`s. `apply_par` slices the Vec symbols exactly as before (each slice builds its own arena).
+Words are multiplied by the table (4 lookups per word); symbols below `TAB_MIN()` = 8 words use the SWAR loop (the table costs
+1.3 ms to build): `apply_arena`, K = 1000: T = 16: 2 ms (SWAR) vs 3 (table); T = 64: 6 vs 4; T = 128: 9 vs 6; T = 256: 16 vs 11;
+T = 1024: 61 vs 35.
+
+Measured (tools/bench-style harness `tests/codec_plan_bench.bend`, native, `--threads 1`, one A720 core pinned, ms; before = commit
+97fdfba, after = this commit):
+| K | T | plan | block with plan, before | after | decode with plan, before | after |
+|---|---|---|---|---|---|---|
+| 1000 | 1024 | 53 | 272 | 39 | 339 | 50 |
+| 4000 | 1024 | 327 | 1484 | 179 | 2308 | 251 |
+`tools/profile/bench_apply.bend` times the stages: K = 1000, T = 1024: `apply_arena` 33 ms (about 7.5M words of symbol arithmetic, 4.4 ns per
+word including cache misses; the hot-cache microbenchmark is 2.9), the read-out of the 1071 solution symbols as `Vec`s 8 ms; K = 4000:
+148 ms and ~40 ms. What is left of a one-shot solve is the plan (`plan_ms` above, T independent): phase 1 / normalisation 22 ms (K = 1000)
+/ 121 ms (K = 4000) and 29 / ~180 ms of coefficient-side work on `Vec` trees (pivot coefficient vectors, dense-row correction, tail
+Gauss-Jordan).

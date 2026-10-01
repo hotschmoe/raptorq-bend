@@ -24,6 +24,7 @@
 import Base
 import ./gf256.bend as G
 import ./types.bend as T
+import ./flat.bend as F
 
 # ===========================================================================
 # 1. Small helpers
@@ -1414,160 +1415,130 @@ def Solver.plan_cols(plan: Plan) -> U32:
       l
 
 # ===========================================================================
-# 9. Solver.apply: the plan replayed on symbols
+# 9. Solver.apply: the plan replayed on symbols, on ONE flat Array<U32> (the symbol arena)
 # ===========================================================================
-# ra = rhs symbols by input row id, ar = pivot symbols R_k, rt = tail row symbols R'_i, ca = solution C by column
-type Ap is Type:
-  Ap{ra: Array<G.Vec>, ar: Array<G.Vec>, rt: Array<G.Vec>}
+# All symbols of an apply live in a single `Array<U32>` (4 octets per slot, wu = words per symbol, symbol s of a region at
+# slot base + s * wu); every step is a tail-recursive loop over slices (src/flat.bend; docs/profile.md R3).  The plan stays
+# pure data (lists, no Array): apply builds the arena, so a plan is still duplicable and reusable.  Layout, in slots:
+#   [product table 64K, only if tab] [rhs symbols by row id: nrows] [pivot symbols R_k: npiv] [tail rows R'_i: ntr]
+#   [solution C by column: l] [one scratch symbol]
+# The table T[(c << 8) | b] = c * b makes a word product four lookups (2.9 ns/word vs 8.6 for the SWAR loop); building it takes
+# about 1.3 ms, so symbols below TAB_MIN() words (T < 32 octets) use the SWAR loop instead (tab = False); measured K = 1000:
+# T = 64: 4 ms with the table vs 6 without, T = 256: 11 vs 16, T = 1024: 35 vs 61, T = 16: 3 vs 2.
+def TAB_MIN() -> U32:
+  8
 
-def ra_fill(rs: List<&2, G.Vec>, +i: U32, ra: Array<G.Vec>) -> Array<G.Vec>:
-  match rs:
+# R_k = rhs[id_k] + sum g * R_j  (dst = the pivot's slot, already holding rhs[id_k])
+def ap.log(lg: List<&2, Lg>, +tab: Bool, +w: Nat, +wu: U32, +dst: U32, +ar: U32, a: Array<U32>) -> Array<U32>:
+  match lg:
     case Nil{}:
-      ra
-    case h <> t:
-      ra_fill(t, (i + 1 : U32), Array.set(G.Vec, ra, i, h))
+      a
+    case Con{h, t}:
+      match h:
+        case Lg{g, j}:
+          ap.log(t, tab, w, wu, dst, ar, F.Flat.axpy(g, tab, w, dst, (ar + j * wu : U32), a))
 
-def ap_pset(+k: U32, ra: Array<G.Vec>, rt: Array<G.Vec>, m: Mt) -> Ap:
-  match m:
-    case Mt{ar, acc}:
-      Ap{ra, Array.set(G.Vec, ar, k, acc), rt}
-
-def ap_p2(+k: U32, log: List<&2, Lg>, ar: Array<G.Vec>, rt: Array<G.Vec>, r: Array<G.Vec> & G.Vec) -> Ap:
-  match r:
-    case Tuple{ra, x}:
-      ap_pset(k, ra, rt, mat_start(log, ar, x))
-
-def ap_pivs(pvs: List<&2, PP>, +k: U32, st: Ap) -> Ap:
-  match pvs st:
-    case Nil{} _:
-      st
-    case PP{+id, pc, finv, log, oc} <> t Ap{ra, ar, rt}:
-      ap_pivs(t, (k + 1 : U32), ap_p2(k, log, ar, rt, Array.get(G.Vec, ra, id)))
-
-def ap_tset(+i: U32, ra: Array<G.Vec>, rt: Array<G.Vec>, m: Mt) -> Ap:
-  match m:
-    case Mt{ar, acc}:
-      Ap{ra, ar, Array.set(G.Vec, rt, i, acc)}
-
-def ap_t2(+i: U32, log: List<&2, Lg>, ar: Array<G.Vec>, rt: Array<G.Vec>, r: Array<G.Vec> & G.Vec) -> Ap:
-  match r:
-    case Tuple{ra, x}:
-      ap_tset(i, ra, rt, mat_start(log, ar, x))
-
-def ap_trs(trs: List<&2, TR>, +i: U32, st: Ap) -> Ap:
-  match trs st:
-    case Nil{} _:
-      st
-    case TR{+id, log} <> t Ap{ra, ar, rt}:
-      ap_trs(t, (i + 1 : U32), ap_t2(i, log, ar, rt, Array.get(G.Vec, ra, id)))
-
-# ---- the inactive columns: C[col] = sum f * R'_i ----------------------------------------------------------
-type Q4 is Type:
-  Q4{rt: Array<G.Vec>, acc: G.Vec}
-
-type Q5 is Type:
-  Q5{ra: Array<G.Vec>, rt: Array<G.Vec>, ca: Array<G.Vec>}
-
-def q4_mul(+f: U32, acc: G.Vec, r: Array<G.Vec> & G.Vec) -> Q4:
-  match r:
-    case Tuple{rt, v}:
-      Q4{rt, sv_muladd(f, acc, v)}
-
-def q4_fold(ts: List<&2, T.Term>, q: Q4) -> Q4:
-  match ts q:
-    case Nil{} _:
-      q
-    case T.Term{+i, f} <> t Q4{rt, acc}:
-      q4_fold(t, q4_mul(f, acc, Array.get(G.Vec, rt, i)))
-
-def ap_tail2(+col: U32, ra: Array<G.Vec>, ca: Array<G.Vec>, q: Q4) -> Q5:
-  match q:
-    case Q4{rt, acc}:
-      Q5{ra, rt, Array.set(G.Vec, ca, col, acc)}
-
-def ap_tail(tail: List<&2, TC>, +zero: G.Vec, st: Q5) -> Q5:
-  match tail st:
-    case Nil{} _:
-      st
-    case TC{+col, ts} <> t Q5{ra, rt, ca}:
-      ap_tail(t, zero, ap_tail2(col, ra, ca, q4_fold(ts, Q4{rt, zero})))
-
-# ---- forward substitution through the original equations of the pivots (RFC phase 5) ----------------------
-type Q3 is Type:
-  Q3{ca: Array<G.Vec>, acc: G.Vec}
-
-type P3 is Type:
-  P3{ra: Array<G.Vec>, ca: Array<G.Vec>}
-
-def q3_mul(+f: U32, acc: G.Vec, r: Array<G.Vec> & G.Vec) -> Q3:
-  match r:
-    case Tuple{ca, v}:
-      Q3{ca, sv_muladd(f, acc, v)}
-
-def q3_fold(ts: List<&2, T.Term>, q: Q3) -> Q3:
-  match ts q:
-    case Nil{} _:
-      q
-    case T.Term{+c, f} <> t Q3{ca, acc}:
-      q3_fold(t, q3_mul(f, acc, Array.get(G.Vec, ca, c)))
-
-def p3_set(+pc: U32, +finv: U32, q: Q3) -> Array<G.Vec>:
-  match q:
-    case Q3{ca, acc}:
-      Array.set(G.Vec, ca, pc, sv_scale(finv, acc))
-
-def p3_one(+pc: U32, +finv: U32, oc: List<&2, T.Term>, ca: Array<G.Vec>, r: Array<G.Vec> & G.Vec) -> P3:
-  match r:
-    case Tuple{ra2, x}:
-      P3{ra2, p3_set(pc, finv, q3_fold(oc, Q3{ca, x}))}
-
-def p3_loop(pvs: List<&2, PP>, st: P3) -> P3:
-  match pvs st:
-    case Nil{} _:
-      st
-    case PP{+id, +pc, +finv, log, oc} <> t P3{ra, ca}:
-      p3_loop(t, p3_one(pc, finv, oc, ca, Array.get(G.Vec, ra, id)))
-
-def arr_to_list(a: Array<G.Vec>, acc: List<&2, G.Vec>) -> List<&2, G.Vec>:
-  match a:
-    case ALeaf{x}:
-      x <> acc
-    case ANode{xs, ys}:
-      arr_to_list(xs, arr_to_list(ys, acc))
-
-def apply.s4(+l: U32, st: P3) -> List<&2, G.Vec>:
-  match st:
-    case P3{ra, ca}:
-      List.take(&2, G.Vec, arr_to_list(ca, Nil{}), U32.to_nat(l))
-
-def apply.s3(+l: U32, pivs: List<&2, PP>, q: Q5) -> List<&2, G.Vec>:
-  match q:
-    case Q5{ra, rt, ca}:
-      apply.s4(l, p3_loop(pivs, P3{ra, ca}))
-
-def apply.s2(+l: U32, pivs: List<&2, PP>, tail: List<&2, TC>, +zero: G.Vec, a: Ap) -> List<&2, G.Vec>:
-  match a:
-    case Ap{ra, ar, rt}:
-      apply.s3(l, pivs, ap_tail(tail, zero, Q5{ra, rt, Array.new(G.Vec, clog(l), G.VNil{})}))
-
-# zero symbol of the shape of the first rhs symbol
-def zero_of(rs: List<&2, G.Vec>) -> G.Vec:
-  match rs:
+# pivots, in selection order: copy rhs[id], add the log entries
+def ap.pivs(pvs: List<&2, PP>, +k: U32, +tab: Bool, +w: Nat, +wu: U32, +ra: U32, +ar: U32, a: Array<U32>) -> Array<U32>:
+  match pvs:
     case Nil{}:
-      G.VNil{}
-    case h <> t:
-      G.Vec.zeros(h)
+      a
+    case Con{pv, t}:
+      match pv:
+        case PP{id, pc, finv, log, oc}:
+          ap.pivs(t, (k + 1 : U32), tab, w, wu, ra, ar, ap.log(log, tab, w, wu, (ar + k * wu : U32), ar, F.Flat.cp.loop(w, 0, (ar + k * wu : U32), (ra + id * wu : U32), a)))
 
-def apply.s1(+l: U32, +nrows: U32, +npiv: U32, +ntr: U32, +pivs: List<&2, PP>, trs: List<&2, TR>, tail: List<&2, TC>, +rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
-  apply.s2(l, pivs, tail, zero_of(rhs), ap_trs(trs, 0, ap_pivs(pivs, 0, Ap{ra_fill(rhs, 0, Array.new(G.Vec, clog(nrows), G.VNil{})), Array.new(G.Vec, clog(npiv), G.VNil{}), Array.new(G.Vec, clog(ntr), G.VNil{})})))
+# tail rows: R'_i = rhs[id_i] + sum g * R_k
+def ap.trs(trs: List<&2, TR>, +i: U32, +tab: Bool, +w: Nat, +wu: U32, +ra: U32, +ar: U32, +rt: U32, a: Array<U32>) -> Array<U32>:
+  match trs:
+    case Nil{}:
+      a
+    case Con{tr, t}:
+      match tr:
+        case TR{id, log}:
+          ap.trs(t, (i + 1 : U32), tab, w, wu, ra, ar, rt, ap.log(log, tab, w, wu, (rt + i * wu : U32), ar, F.Flat.cp.loop(w, 0, (rt + i * wu : U32), (ra + id * wu : U32), a)))
+
+# inactive columns: C[col] = sum f * R'_i  (the dense tail solved: a row of M = A^-1 per column)
+def ap.tail(tail: List<&2, TC>, +tab: Bool, +w: Nat, +wu: U32, +rt: U32, +ca: U32, a: Array<U32>) -> Array<U32>:
+  match tail:
+    case Nil{}:
+      a
+    case Con{tc, t}:
+      match tc:
+        case TC{col, ts}:
+          ap.tail(t, tab, w, wu, rt, ca, F.Flat.fold(ts, tab, w, wu, (ca + col * wu : U32), rt, a))
+
+# forward substitution through the original equations: C[pc_k] = finv_k * (rhs[id_k] + sum f * C[c])
+def ap.p3(pvs: List<&2, PP>, +tab: Bool, +w: Nat, +wu: U32, +ra: U32, +ca: U32, a: Array<U32>) -> Array<U32>:
+  match pvs:
+    case Nil{}:
+      a
+    case Con{pv, t}:
+      match pv:
+        case PP{id, +pc, finv, log, oc}:
+          ap.p3(t, tab, w, wu, ra, ca, F.Flat.scale(finv, tab, w, (ca + pc * wu : U32), F.Flat.fold.go(oc, tab, w, wu, (ca + pc * wu : U32), ca, F.Flat.cp.loop(w, 0, (ca + pc * wu : U32), (ra + id * wu : U32), a))))
+
+def ap.run(+pivs: List<&2, PP>, trs: List<&2, TR>, tail: List<&2, TC>, +tab: Bool, +wu: U32, +ra: U32, +ar: U32, +rt: U32, +ca: U32, a: Array<U32>) -> Array<U32>:
+  ap.p3(pivs, tab, U32.to_nat(wu), wu, ra, ca, ap.tail(tail, tab, U32.to_nat(wu), wu, rt, ca, ap.trs(trs, 0, tab, U32.to_nat(wu), wu, ra, ar, rt, ap.pivs(pivs, 0, tab, U32.to_nat(wu), wu, ra, ar, a))))
+
+# the arena: table (if tab) and the rhs symbols copied in; returns the finished array
+def ap.init(+tab: Bool, a: Array<U32>) -> Array<U32>:
+  match tab:
+    case True{}:
+      F.Flat.table(a)
+    case False{}:
+      a
+
+def ap.tbsz(+tab: Bool) -> U32:
+  match tab:
+    case True{}:
+      65536
+    case False{}:
+      0
+
+def ap.s3(+l: U32, +nrows: U32, +npiv: U32, +ntr: U32, +wu: U32, +tab: Bool, pivs: List<&2, PP>, trs: List<&2, TR>, tail: List<&2, TC>, rhs: List<&2, G.Vec>) -> F.Ar:
+  +ra = ap.tbsz(tab)
+  +ar = (ra + nrows * wu : U32)
+  +rt = (ar + npiv * wu : U32)
+  +ca = (rt + ntr * wu : U32)
+  +sc = (ca + l * wu : U32)
+  F.Ar{ap.run(pivs, trs, tail, tab, wu, ra, ar, rt, ca, F.Flat.fi_arr(F.Flat.lfill(rhs, wu, F.Fi{ra, ap.init(tab, Array.new(U32, clog((sc + wu : U32)), 0))}))), wu, ca, sc}
+
+# word count of the first rhs symbol (all symbols have the same length), list handed back
+type Pk is Data:
+  Pk{wu: U32, xs: List<&2, G.Vec>}
+
+def ap.peek(xs: List<&2, G.Vec>) -> Pk:
+  match xs:
+    case Nil{}:
+      Pk{0, Nil{}}
+    case Con{+h, t}:
+      Pk{F.Flat.words(h), Con{h, t}}
+
+def ap.s2(+l: U32, +nrows: U32, +npiv: U32, +ntr: U32, pivs: List<&2, PP>, trs: List<&2, TR>, tail: List<&2, TC>, pk: Pk) -> F.Ar:
+  match pk:
+    case Pk{+wu, xs}:
+      ap.s3(l, nrows, npiv, ntr, wu, U32.is_ge(wu, TAB_MIN()), pivs, trs, tail, xs)
+
+# Replays a plan on the rhs symbols (`rhs` = one symbol per row of the system the plan was made from, same order, exactly
+# Solver.plan_rows(plan) of them, all of the same length) and returns the solved ARENA (flat symbols, see src/flat.bend)
+# instead of a list of trees: C[0..l-1] are the symbols at slots ca + c * wu.  For callers that go on computing with the
+# solution (the codec re-encodes from it) without converting to trees and back.
+def Solver.apply_arena(plan: Plan, rhs: List<&2, G.Vec>) -> F.Ar:
+  match plan:
+    case Plan{l, nrows, npiv, ntr, pivs, trs, tail}:
+      ap.s2(l, nrows, npiv, ntr, pivs, trs, tail, ap.peek(rhs))
+
+def apply.fin(+l: U32, ar: F.Ar) -> List<&2, G.Vec>:
+  F.Flat.ar_list(l, ar)
 
 # Replays a plan on the rhs symbols: `rhs` = one symbol per row of the system the plan was made from (same order,
 # exactly Solver.plan_rows(plan) of them, all of the same length).  Returns C[0..l-1].  Pure; a plan may be applied
 # any number of times (to different symbol sizes too).
 def Solver.apply(plan: Plan, rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
   match plan:
-    case Plan{l, nrows, npiv, ntr, pivs, trs, tail}:
-      apply.s1(l, nrows, npiv, ntr, pivs, trs, tail, rhs)
+    case Plan{+l, nrows, npiv, ntr, pivs, trs, tail}:
+      apply.fin(l, ap.s2(l, nrows, npiv, ntr, pivs, trs, tail, ap.peek(rhs)))
 
 # ===========================================================================
 # 10. Public solve entry points = plan + apply

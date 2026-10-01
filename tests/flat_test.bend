@@ -107,6 +107,39 @@ def kern_all(n: Nat, +i: U32, acc: Bool) -> Bool:
     case 1n+p:
       kern_all(p, U32.inc(i), band(acc, band(kern((U32.and(i, 7) + 1 : U32), (i * 37 + 2 : U32)), kern((U32.and(i, 7) + 1 : U32), 255))))
 
+# ---- table kernels (64K product table at slot 0, data at 65536 / 65544) vs the Vec ops --------------------------------------
+def tdata(+x: G.Vec, +y: G.Vec) -> Array<U32>:
+  F.Flat.put_vec(y, 65544, F.Flat.put_vec(x, 65536, F.Flat.table(Array.new(U32, 17n, 0))))
+
+def t_axpy(+n: U32, +c: U32, +tab: Bool, +x: G.Vec, +y: G.Vec) -> Bool:
+  vec_eq(G.Vec.muladd(c, x, y), F.Flat.get_vec_only(F.Flat.axpy(c, tab, U32.to_nat(n), 65536, 65544, tdata(x, y)), 65536, n))
+
+def t_axset(+n: U32, +c: U32, +tab: Bool, +x: G.Vec, +y: G.Vec) -> Bool:
+  vec_eq(G.Vec.scale(c, y), F.Flat.get_vec_only(F.Flat.axset(c, tab, U32.to_nat(n), 65536, 65544, tdata(x, y)), 65536, n))
+
+def t_scale(+n: U32, +c: U32, +tab: Bool, +x: G.Vec) -> Bool:
+  vec_eq(G.Vec.scale(c, x), F.Flat.get_vec_only(F.Flat.scale(c, tab, U32.to_nat(n), 65536, tdata(x, x)), 65536, n))
+
+def t_one(+n: U32, +c: U32, +tab: Bool) -> Bool:
+  +x = vec_of(n, 77)
+  +y = vec_of(n, 31337)
+  band(t_axpy(n, c, tab, x, y), band(t_axset(n, c, tab, x, y), t_scale(n, c, tab, x)))
+
+def t_all(n: Nat, +i: U32, acc: Bool) -> Bool:
+  match n:
+    case 0n:
+      acc
+    case 1n+p:
+      t_all(p, U32.inc(i), band(acc, band(t_one((U32.and(i, 7) + 1 : U32), (U32.and((i * 37 + 1 : U32), 255)), True{}), t_one((U32.and(i, 7) + 1 : U32), (U32.and((i * 41 + 3 : U32), 255)), False{}))))
+
+# coefficients 0, 5, 10, .. 255 (and 1 by t_all), table path
+def t_coefs(n: Nat, +c: U32, acc: Bool) -> Bool:
+  match n:
+    case 0n:
+      acc
+    case 1n+p:
+      t_coefs(p, (c + 5 : U32), band(acc, t_one(5, c, True{})))
+
 # ---- flat encoding symbols == the per-ESI tree path --------------------------------------------------------------------
 def bytes.go(n: Nat, +x: U32, acc: List<&2, U32>) -> List<&2, U32>:
   match n:
@@ -157,6 +190,7 @@ def main() -> IO(Unit):
     b : U32 <- check(band(rt(255), band(rt(256), band(rt(257), rt(1000)))), "round trip 255, 256, 257, 1000 words")
     c : U32 <- check(band(rt_at(1, 3), band(rt_at(5, 3), band(rt_at(5, 16), rt_at(7, 24)))), "put_vec / get_vec at an offset")
     d : U32 <- check(kern_all(24n, 0, True{}), "xor / copy / zero / mulw kernels == Vec.xor / scale / muladd")
+    d2 : U32 <- check(band(t_all(8n, 0, True{}), t_coefs(52n, 0, True{})), "table kernels axpy / axset / scale (coefficients 0,5,..,255, with and without table) == Vec ops")
     e : U32 <- check(band(enc_case(10, 16), band(enc_case(10, 5), band(enc_case(26, 4), enc_case(50, 20)))), "flat Codec.symbols == per-ESI Codec.symbol (K=10,26,50; T=16,5,4,20)")
     f : U32 <- check(band(enc_case(100, 64), enc_case(8, 1024)), "flat Codec.symbols, K=100 T=64, K=8 T=1024")
-    fin((a + b + c + d + e + f : U32))
+    fin((a + b + c + d + d2 + e + f : U32))

@@ -286,6 +286,14 @@ def dec.fin(r: Maybe<&2, List<&2, G.Vec>>, +k: U32, +sp: T.SP) -> Maybe<&2, List
     case Some{inter}:
       Some{F.Flat.encode_list(sp, k, inter, 0, k)}
 
+# the K source symbols from a plan and the rhs symbols: replay on the arena, re-encode from it (no tree conversion in between)
+def dec.arena(pl: Maybe<&2, S.Plan>, rhs: List<&2, G.Vec>, +k: U32, +sp: T.SP) -> Maybe<&2, List<&2, G.Vec>>:
+  match pl:
+    case None{}:
+      None{}
+    case Some{plan}:
+      Some{F.Flat.encode_arena(sp, k, S.Solver.apply_arena(plan, rhs), 0, k)}
+
 def dec.solve(m: Maybe<&2, T.SP>, enough: Bool, +k: U32, +t: U32, rv: List<&2, Y.Rcv>) -> Maybe<&2, List<&2, G.Vec>>:
   match m:
     case None{}:
@@ -295,7 +303,8 @@ def dec.solve(m: Maybe<&2, T.SP>, enough: Bool, +k: U32, +t: U32, rv: List<&2, Y
         case False{}:
           None{}
         case True{}:
-          dec.fin(S.Solver.solve_p(R.L(sp), R.P(sp), append_rows(C.fixed(sp, t), C.received_rows(sp, k, rv))), k, sp)
+          +rows = append_rows(C.fixed(sp, t), C.received_rows(sp, k, rv))
+          dec.arena(S.Solver.plan(R.L(sp), R.P(sp), rows), S.rows_rhs(rows, Nil{}), k, sp)
 
 # RFC 5.4: from >= K received symbols (ESI + data, any order) to the K source symbols.
 # The decoding matrix (S+H constraint rows, one LT row per received symbol, the K'-K padding rows) is
@@ -439,7 +448,14 @@ def Codec.encode_with_plan(+k: U32, +t: U32, plan: S.Plan, source: List<&2, G.Ve
   +src = source
   ewp.go(R.params(k), band(U32.is_eq(len_sym(src, 0), k), U32.is_gt(t, 0)), k, t, plan, src)
 
-def dwp.go(m: Maybe<&2, T.SP>, tok: Bool, +k: U32, +t: U32, plan: S.Plan, syms: List<&2, G.Vec>) -> Maybe<&2, List<&2, G.Vec>>:
+def dwp.fin(ok: Bool, plan: S.Plan, rhs: List<&2, G.Vec>, +k: U32, +sp: T.SP) -> Maybe<&2, List<&2, G.Vec>>:
+  match ok:
+    case True{}:
+      dec.arena(Some{plan}, rhs, k, sp)
+    case False{}:
+      None{}
+
+def dwp.go(m: Maybe<&2, T.SP>, tok: Bool, +k: U32, +t: U32, +plan: S.Plan, syms: List<&2, G.Vec>) -> Maybe<&2, List<&2, G.Vec>>:
   match m:
     case None{}:
       None{}
@@ -448,7 +464,8 @@ def dwp.go(m: Maybe<&2, T.SP>, tok: Bool, +k: U32, +t: U32, plan: S.Plan, syms: 
         case False{}:
           None{}
         case True{}:
-          dec.fin(wp.inter(sp, k, t, plan, syms), k, sp)
+          +rhs = wp.rhs(sp, k, t, syms)
+          dwp.fin(wp.ok(plan, rhs, R.L(sp)), plan, rhs, k, sp)
 
 # Codec.decode with a plan from Codec.plan_for(k, esis): `syms` are the received symbols' data in the SAME order as `esis`.
 # Returns the K source symbols (re-encoded from the intermediate symbols, like Codec.decode).  None if the plan does not fit
