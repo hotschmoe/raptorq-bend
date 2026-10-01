@@ -11,6 +11,11 @@
 #                                    the intermediate symbols are copied ONCE into one flat array, each encoding symbol is
 #                                    a tail loop XORing the needed slices into a scratch slice, then read out as a Vec.
 #
+#   Flat.table / Flat.axpy / axset / scale / fold   64K product table kernels and the row operations d ^= c*s, d = c*s, d = c*d, and
+#                                    d ^= sum f * symbol (with `tab = False`: SWAR G.mulw instead of the table): what Solver.apply and the
+#                                    coefficient side of Solver.plan (p2.* in solver.bend) are built from
+#   Ar / Flat.encode_arena           a solved arena (Solver.apply_arena) and encoding symbols computed from it without trees in between
+#
 # Idioms (docs/profile.md section 5): `Array.get` hands the array back next to the value, so every access is a helper def
 # that destructures the pair; loops are Nat-fuel tail recursion; the array is threaded through the loop.
 import Base

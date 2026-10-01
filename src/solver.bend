@@ -1728,8 +1728,14 @@ def solve_par.go(pl: Maybe<&2, Plan>, +d: U32, rhs: List<&2, G.Vec>) -> Maybe<&2
 def Solver.solve_par(+l: U32, +p: U32, +d: U32, +rows: List<&2, T.Row>) -> Maybe<&2, List<&2, G.Vec>>:
   solve_par.go(Solver.plan(l, p, rows), d, rows_rhs(rows, Nil{}))
 
-# Slicing depth for t threads and symbols of sw words: none below 64 words (256 octets), else log2(threads) capped at 3
-# (8 slices; 16 slices on 12 threads were slower, see docs/perf.md).
+# Slicing depth for t threads, symbols of sw words and nrows rhs symbols: none below 64 words (256 octets) or below
+# AUTO_MIN_WORDS() words of symbol data in total, else log2(threads) capped at 3 (8 slices; 16 slices on 12 threads were
+# slower, see docs/perf.md).  Since the symbol work runs on a flat arena (docs/plan_apply.md, update) one apply costs only about
+# 4 ns per word, so a slice pays back its fork rounds, per-slice table and read-out only for very large blocks:
+# measured on 12 threads, K = 1000..4000 T = 1024 (0.3-1M words) slicing is 1.0-1.5x SLOWER, K = 10000 T = 1024 (2.7M words) +-0.
+def AUTO_MIN_WORDS() -> U32:
+  8388608
+
 def auto_d.go(small: Bool, +t: U32) -> U32:
   match small:
     case True{}:
@@ -1737,11 +1743,11 @@ def auto_d.go(small: Bool, +t: U32) -> U32:
     case False{}:
       U32.min(3, U32.from_nat(U32.log2(U32.max(t, 1))))
 
-def auto_d(+t: U32, +sw: U32) -> U32:
-  auto_d.go(U32.is_lt(sw, 64), t)
+def Solver.auto_depth(+t: U32, +sw: U32, +nrows: U32) -> U32:
+  auto_d.go(Bool.or(U32.is_lt(sw, 64), U32.is_lt((nrows * sw : U32), AUTO_MIN_WORDS())), t)
 
 def apply_auto2(t: U32, +plan: Plan, +rhs: List<&2, G.Vec>) -> List<&2, G.Vec>:
-  Solver.apply_par(auto_d(t, rhs_sw(rhs)), plan, rhs)
+  Solver.apply_par(Solver.auto_depth(t, rhs_sw(rhs), Solver.plan_rows(plan)), plan, rhs)
 
 # Solver.apply_par with the slicing depth chosen from the thread count of the running binary (IO.thread_count)
 # and the symbol size.  For callers that live in IO.

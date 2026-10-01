@@ -75,8 +75,11 @@ def bench(+k: U32, +t: U32) -> IO(Unit):
   +src = Q.Codec.split(data, t)
   do IO<Unit>:
     +sp0 : T.SP <- IO.pure(T.SP, Maybe.default(&2, T.SP, R.params(k), T.SP{0, 0, 0, 0, 0, 0}))
+    +tr0 : Nat <- IO.now()
     +rows : List<&2, Y.Row> <- IO.pure(List<&2, Y.Row>, Q.append_rows(C.fixed(sp0, 0), C.received_rows(sp0, k, Q.rcv_rev(Q.esi_seq(U32.to_nat(k), (k - 1 : U32), []), []))))
     IO.print("rows built " ++ Nat.show(List.length(&2, Y.Row, rows)))
+    +tr1 : Nat <- IO.now()
+    IO.print("rows_ms=" ++ Nat.show((tr1 - tr0 : Nat)))
     +ta : Nat <- IO.now()
     IO.print("inactive_count " ++ U32.show(S.Solver.inactive_count(R.L(sp0), R.P(sp0), rows)))
     +tb : Nat <- IO.now()

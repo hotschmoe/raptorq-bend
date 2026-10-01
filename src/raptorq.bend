@@ -339,6 +339,15 @@ def Codec.encoder_auto(+k: U32, +t: U32, source: List<&2, G.Vec>) -> IO(Maybe<&2
   +ok = band(U32.is_eq(len_sym(src, 0), k), band(U32.is_gt(k, 0), U32.is_gt(t, 0)))
   enc.solve_auto(R.params(k), ok, k, t, src)
 
+# d = slicing depth (Solver.auto_depth): 0 is the pure decoder (arena replay and re-encode), else sliced solve + tree list re-encode
+def dec.auto_go(d: U32, +sp: T.SP, +k: U32, rows: List<&2, Y.Row>) -> Maybe<&2, List<&2, G.Vec>>:
+  match d:
+    case 0:
+      +rs = rows
+      dec.arena(S.Solver.plan(R.L(sp), R.P(sp), rs), S.rows_rhs(rs, Nil{}), k, sp)
+    case _:
+      dec.fin(S.Solver.solve_par(R.L(sp), R.P(sp), d, rows), k, sp)
+
 def dec.solve_auto(m: Maybe<&2, T.SP>, enough: Bool, +k: U32, +t: U32, rv: List<&2, Y.Rcv>) -> IO(Maybe<&2, List<&2, G.Vec>>):
   match m:
     case None{}:
@@ -349,8 +358,8 @@ def dec.solve_auto(m: Maybe<&2, T.SP>, enough: Bool, +k: U32, +t: U32, rv: List<
           IO.pure(Maybe<&2, List<&2, G.Vec>>, None{})
         case True{}:
           do IO<Maybe<&2, List<&2, G.Vec>>>:
-            r : Maybe<&2, List<&2, G.Vec>> <- S.Solver.solve_auto(R.L(sp), R.P(sp), append_rows(C.fixed(sp, t), C.received_rows(sp, k, rv)))
-            IO.pure(Maybe<&2, List<&2, G.Vec>>, dec.fin(r, k, sp))
+            th : U32 <- IO.thread_count()
+            IO.pure(Maybe<&2, List<&2, G.Vec>>, dec.auto_go(S.Solver.auto_depth(th, U32.shrn((t + 3 : U32), 2n), R.L(sp)), sp, k, append_rows(C.fixed(sp, t), C.received_rows(sp, k, rv))))
 
 def Codec.decode_auto(+k: U32, +t: U32, received: List<&2, Y.Rcv>) -> IO(Maybe<&2, List<&2, G.Vec>>):
   +rv = received
@@ -504,7 +513,25 @@ def Codec.encode_with_plan_auto(+k: U32, +t: U32, plan: S.Plan, source: List<&2,
   +src = source
   ewp.go_auto(R.params(k), band(U32.is_eq(len_sym(src, 0), k), U32.is_gt(t, 0)), k, t, plan, src)
 
-def dwp.go_auto(m: Maybe<&2, T.SP>, tok: Bool, +k: U32, +t: U32, plan: S.Plan, syms: List<&2, G.Vec>) -> IO(Maybe<&2, List<&2, G.Vec>>):
+# sliced apply (d > 0): replay on 2^d slices, re-encode from the list of trees; d = 0: the arena path of decode_with_plan
+def dwp.auto2(ok: Bool, +d: U32, plan: S.Plan, rhs: List<&2, G.Vec>, +k: U32, +sp: T.SP) -> Maybe<&2, List<&2, G.Vec>>:
+  match ok:
+    case False{}:
+      None{}
+    case True{}:
+      match d:
+        case 0:
+          dec.arena(Some{plan}, rhs, k, sp)
+        case _:
+          dec.fin(Some{S.Solver.apply_par(d, plan, rhs)}, k, sp)
+
+def dwp.auto1(+sp: T.SP, +k: U32, +t: U32, +plan: S.Plan, syms: List<&2, G.Vec>) -> IO(Maybe<&2, List<&2, G.Vec>>):
+  +rhs = wp.rhs(sp, k, t, syms)
+  do IO<Maybe<&2, List<&2, G.Vec>>>:
+    th : U32 <- IO.thread_count()
+    IO.pure(Maybe<&2, List<&2, G.Vec>>, dwp.auto2(wp.ok(plan, rhs, R.L(sp)), S.Solver.auto_depth(th, U32.shrn((t + 3 : U32), 2n), S.Solver.plan_rows(plan)), plan, rhs, k, sp))
+
+def dwp.go_auto(m: Maybe<&2, T.SP>, tok: Bool, +k: U32, +t: U32, +plan: S.Plan, syms: List<&2, G.Vec>) -> IO(Maybe<&2, List<&2, G.Vec>>):
   match m:
     case None{}:
       IO.pure(Maybe<&2, List<&2, G.Vec>>, None{})
@@ -513,9 +540,7 @@ def dwp.go_auto(m: Maybe<&2, T.SP>, tok: Bool, +k: U32, +t: U32, plan: S.Plan, s
         case False{}:
           IO.pure(Maybe<&2, List<&2, G.Vec>>, None{})
         case True{}:
-          do IO<Maybe<&2, List<&2, G.Vec>>>:
-            r : Maybe<&2, List<&2, G.Vec>> <- wp.inter_auto(sp, k, t, plan, syms)
-            IO.pure(Maybe<&2, List<&2, G.Vec>>, dec.fin(r, k, sp))
+          dwp.auto1(sp, k, t, plan, syms)
 
 def Codec.decode_with_plan_auto(+k: U32, +t: U32, plan: S.Plan, syms: List<&2, G.Vec>) -> IO(Maybe<&2, List<&2, G.Vec>>):
   dwp.go_auto(R.params(k), U32.is_gt(t, 0), k, t, plan, syms)

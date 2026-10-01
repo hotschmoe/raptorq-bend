@@ -6,6 +6,9 @@ import Base
 import ../src/gf256.bend as G
 import ../src/types.bend as Y
 import ../src/raptorq.bend as Q
+import ../src/tables.bend as T
+import ../src/rfc_funcs.bend as R
+import ../src/constraints.bend as C
 
 def band(a: Bool, b: Bool) -> Bool:
   match a:
@@ -82,6 +85,11 @@ def check(b: Bool, name: String) -> IO(U32):
         IO.print("FAIL " ++ name)
         IO.pure(U32, 1)
 
+# the sliced branch of decode_auto (Solver.auto_depth is 0 for blocks this small), forced with d = 3
+def sliced_dec(+k: U32, +t: U32, rv: List<&2, Y.Rcv>) -> Maybe<&2, List<&2, G.Vec>>:
+  +sp = Maybe.default(&2, T.SP, R.params(k), T.SP{0, 0, 0, 0, 0, 0})
+  Q.dec.auto_go(3, sp, k, Q.append_rows(C.fixed(sp, t), C.received_rows(sp, k, rv)))
+
 def case2(m: Maybe<&2, Q.Enc>, ma: Maybe<&2, Q.Enc>, +k: U32, +t: U32, src: List<&2, G.Vec>) -> IO(U32):
   match m ma:
     case Some{+e} Some{+ea}:
@@ -92,7 +100,8 @@ def case2(m: Maybe<&2, Q.Enc>, ma: Maybe<&2, Q.Enc>, +k: U32, +t: U32, src: List
         +dp : Maybe<&2, List<&2, G.Vec>> <- IO.pure(Maybe<&2, List<&2, G.Vec>>, Q.Codec.decode(k, t, rv))
         c2 : U32 <- check(mb_eq(dp, da), "decode_auto == decode, K=" ++ U32.show(k) ++ " T=" ++ U32.show(t))
         c3 : U32 <- check(mb_eq(da, Some{src}), "decode_auto recovers the source, K=" ++ U32.show(k) ++ " T=" ++ U32.show(t))
-        IO.pure(U32, (c1 + c2 + c3 : U32))
+        c4 : U32 <- check(mb_eq(sliced_dec(k, t, rv), dp), "sliced (d=3) decode == decode, K=" ++ U32.show(k) ++ " T=" ++ U32.show(t))
+        IO.pure(U32, (c1 + c2 + c3 + c4 : U32))
     case _ _:
       do IO<U32>:
         IO.print("FAIL encoder returned None")

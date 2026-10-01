@@ -326,6 +326,12 @@ def auto_run(m: Maybe<&2, S.Plan>, +k: U32, +t: U32) -> IO(U32):
     case Some{+plan}:
       auto_go(k, t, plan, rnd_syms(U32.to_nat(k), U32.shrn((t + 3 : U32), 2n), 99, []))
 
+# the sliced branch of decode_with_plan_auto (Solver.auto_depth = 0 for blocks this small), forced with d = 3
+def sliced_dec(+k: U32, +t: U32, +plan: S.Plan, syms: List<&2, G.Vec>) -> Maybe<&2, List<&2, G.Vec>>:
+  +sp = Maybe.default(&2, T.SP, R.params(k), T.SP{0, 0, 0, 0, 0, 0})
+  +rhs = Q.wp.rhs(sp, k, t, syms)
+  Q.dwp.auto2(True{}, 3, plan, rhs, k, sp)
+
 def auto_dec2(m: Maybe<&2, Q.Enc>, +k: U32, +t: U32, +plan: S.Plan, +es: List<&2, U32>) -> IO(U32):
   match m:
     case None{}:
@@ -335,7 +341,9 @@ def auto_dec2(m: Maybe<&2, Q.Enc>, +k: U32, +t: U32, +plan: S.Plan, +es: List<&2
         r : Maybe<&2, List<&2, G.Vec>> <- Q.Codec.decode_with_plan_auto(k, t, plan, sym_of_enc(es, e))
         +a : U32 <- IO.pure(U32, fail(mb_syms_eq(r, Q.Codec.decode_with_plan(k, t, plan, sym_of_enc(es, e)))))
         IO.print("auto decode K=" ++ U32.show(k) ++ " T=" ++ U32.show(t) ++ ": " ++ U32.show(a))
-        IO.pure(U32, a)
+        +b : U32 <- IO.pure(U32, fail(mb_syms_eq(sliced_dec(k, t, plan, sym_of_enc(es, e)), Q.Codec.decode_with_plan(k, t, plan, sym_of_enc(es, e)))))
+        IO.print("sliced (d=3) decode K=" ++ U32.show(k) ++ " T=" ++ U32.show(t) ++ ": " ++ U32.show(b))
+        IO.pure(U32, (a + b : U32))
 
 def auto_dec(m: Maybe<&2, S.Plan>, +k: U32, +t: U32, +es: List<&2, U32>) -> IO(U32):
   match m:
