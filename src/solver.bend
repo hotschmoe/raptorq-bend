@@ -1487,10 +1487,11 @@ def plan_go(+l: U32, +p: U32, +nrows: U32, rows: List<&2, T.Row>) -> Maybe<&2, P
   +nw = nwords(l)
   phase1_fin(phase1(l, p, nrows, rows, nw), l, nrows, nw)
 
+# Reference implementation of `Solver.plan` (phase 1 on lists and Array<Rw>); same plan, kept for tests (tests/solver_plan_test.bend).
 # The symbol-independent part of the inactivation solve (RFC 5.4.2.2): only the coefficients (`cols`) of the rows are
 # looked at, the rhs symbols are ignored (callers may pass G.VNil{}).  p = number of permanently inactive columns
 # (the last p columns).  None if rank < l.  Row i of the system is rhs symbol i of Solver.apply.
-def Solver.plan(+l: U32, +p: U32, +rows: List<&2, T.Row>) -> Maybe<&2, Plan>:
+def Solver.plan_ref(+l: U32, +p: U32, +rows: List<&2, T.Row>) -> Maybe<&2, Plan>:
   plan_go(l, p, U32.from_nat(List.length(&2, T.Row, rows)), rows)
 
 # number of rhs symbols (= rows of the system) Solver.apply expects, and the number of columns of the solution
@@ -1503,6 +1504,891 @@ def Solver.plan_cols(plan: Plan) -> U32:
   match plan:
     case Plan{l, nrows, npiv, ntr, pivs, trs, tail}:
       l
+
+# ===========================================================================
+# 6b. Phase 1 on FLAT ARRAYS (docs/scaling.md E3; the list version above stays as the reference, `Solver.plan_ref`)
+# ===========================================================================
+# The elimination order of phase 1 depends only on the static sparse structure: a column leaves the active set globally (it becomes a pivot
+# column or is inactivated), a row's active part is its original terms in still-active columns, so the active part never changes otherwise and the
+# elimination logs / inactive terms of every row can be derived from the final column states afterwards.  So the loop only needs: row term
+# arrays (CSR, packed col * 256 + coef, sorted), the column -> rows index (static CSR), row weights, buckets by weight as doubly linked lists
+# (head = most recently pushed, so the choice of pivot rows is the same as the lazy bucket lists above), a global state per column
+# (0 active, 1 pivot, 2 + position inactive).  Everything lives in ONE Array<U32>; offsets (n = rows, l = columns, t = term capacity):
+#   rs 0 | rl n | na 2n | wt 3n | kd 4n | bn 5n | bp 6n | st 7n | ow 8n | tl 9n | pr 10n | pf 11n | pcl 12n | cs 13n | cj 13n+l | ic 13n+2l |
+#   cst 13n+3l (l+1) | cu 13n+4l+1 | bh 13n+5l+1 (64) | ct 13n+5l+65 (t) | cr ct+t (t)
+#   rs/rl term range of the row in ct, na = length of the active prefix (columns < l-p; terms are sorted), wt weight, kd 0 sparse 1 pivot 2 dense,
+#   bn/bp bucket links (id+1, 0 = none), st/ow/tl stamp, old weight, touched list of the current step, pr/pf/pcl pivot row, frozen coefficient and
+#   column of pivot j, cs/cj column state and pivot number, ic inactivated columns in order, cst/cu/cr the column index, bh bucket heads.
+def f1.rl(+n: U32) -> U32:
+  n
+
+def f1.na(+n: U32) -> U32:
+  (2 * n : U32)
+
+def f1.wt(+n: U32) -> U32:
+  (3 * n : U32)
+
+def f1.kd(+n: U32) -> U32:
+  (4 * n : U32)
+
+def f1.bn(+n: U32) -> U32:
+  (5 * n : U32)
+
+def f1.bp(+n: U32) -> U32:
+  (6 * n : U32)
+
+def f1.st(+n: U32) -> U32:
+  (7 * n : U32)
+
+def f1.ow(+n: U32) -> U32:
+  (8 * n : U32)
+
+def f1.tl(+n: U32) -> U32:
+  (9 * n : U32)
+
+def f1.pr(+n: U32) -> U32:
+  (10 * n : U32)
+
+def f1.pf(+n: U32) -> U32:
+  (11 * n : U32)
+
+def f1.pcl(+n: U32) -> U32:
+  (12 * n : U32)
+
+def f1.cs(+n: U32) -> U32:
+  (13 * n : U32)
+
+def f1.cj(+n: U32, +l: U32) -> U32:
+  (13 * n + l : U32)
+
+def f1.ic(+n: U32, +l: U32) -> U32:
+  (13 * n + 2 * l : U32)
+
+def f1.cst(+n: U32, +l: U32) -> U32:
+  (13 * n + 3 * l : U32)
+
+def f1.cu(+n: U32, +l: U32) -> U32:
+  (13 * n + 4 * l + 1 : U32)
+
+def f1.bh(+n: U32, +l: U32) -> U32:
+  (13 * n + 5 * l + 1 : U32)
+
+def f1.ct(+n: U32, +l: U32) -> U32:
+  (13 * n + 5 * l + 65 : U32)
+
+def f1.size(+n: U32, +l: U32, +t: U32) -> U32:
+  (13 * n + 5 * l + 65 + 2 * t : U32)
+
+# ---- array helpers -----------------------------------------------------------------------------------------------------
+# a[i] += 1
+def f1.inc.f(+i: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, y) = rd
+  Array.set(U32, a, i, (y + 1 : U32))
+
+def f1.inc(+i: U32, a: Array<U32>) -> Array<U32>:
+  f1.inc.f(i, Array.get(U32, a, i))
+
+# ---- ingestion: raw terms -> packed, sorted, duplicate columns XORed, zero coefficients dropped (the semantics of `tsort`) -------------------
+def ig.put(ts: List<&2, T.Term>, +k: U32, a: Array<U32>) -> Array<U32>:
+  match ts:
+    case Nil{}:
+      a
+    case Con{h, rest}:
+      match h:
+        case T.Term{c, f}:
+          ig.put(rest, (k + 1 : U32), Array.set(U32, a, k, (c * 256 + f : U32)))
+
+# insertion sort of a[s .. s+len): the element at position i is inserted into the sorted prefix
+type Is is Type:
+  Is{a: Array<U32>, k: U32, x: U32, act: U32}
+
+def is.s3(gt: Bool, +k: U32, +x: U32, +y: U32, a: Array<U32>) -> Is:
+  match gt:
+    case True{}:
+      Is{Array.set(U32, a, k, y), (k - 1 : U32), x, 1}
+    case False{}:
+      Is{a, k, x, 0}
+
+def is.s2(+k: U32, +x: U32, rd: Array<U32> & U32) -> Is:
+  (a, +y) = rd
+  is.s3(U32.is_gt(y, x), k, x, y, a)
+
+def is.s1(go: Bool, +k: U32, +x: U32, a: Array<U32>) -> Is:
+  match go:
+    case True{}:
+      is.s2(k, x, Array.get(U32, a, (k - 1 : U32)))
+    case False{}:
+      Is{a, k, x, 0}
+
+def is.step(+s: U32, st: Is) -> Is:
+  match st:
+    case Is{a, +k, +x, +act}:
+      is.s1(band(U32.is_eq(act, 1), U32.is_gt(k, s)), k, x, a)
+
+def is.ins(+m: Nat, +s: U32, st: Is) -> Is:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      is.ins(q, s, is.step(s, st))
+
+def is.done(st: Is) -> Array<U32>:
+  match st:
+    case Is{a, k, x, act}:
+      Array.set(U32, a, k, x)
+
+def is.one(+i: U32, +s: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, x) = rd
+  is.done(is.ins(U32.to_nat(i), s, Is{a, (s + i : U32), x, 1}))
+
+def is.outer(+m: Nat, +i: U32, +s: U32, a: Array<U32>) -> Array<U32>:
+  match m:
+    case 0n:
+      a
+    case 1n+q:
+      is.outer(q, (i + 1 : U32), s, is.one(i, s, Array.get(U32, a, (s + i : U32))))
+
+# compaction: merge equal columns (XOR the coefficients), drop zero coefficients; o = next output slot
+type Dc is Type:
+  Dc{a: Array<U32>, o: U32}
+
+def dc.s5b(+c: U32, +o: U32, +x: U32, a: Array<U32>) -> Dc:
+  match c:
+    case 0:
+      Dc{a, o}
+    case _:
+      Dc{Array.set(U32, a, o, x), (o + 1 : U32)}
+
+def dc.s5(+o: U32, +x: U32, a: Array<U32>) -> Dc:
+  dc.s5b(U32.and(x, 255), o, x, a)
+
+# merged coefficient c (the column bits of y are kept)
+def dc.s6(+c: U32, +o: U32, +y: U32, a: Array<U32>) -> Dc:
+  match c:
+    case 0:
+      Dc{a, (o - 1 : U32)}
+    case _:
+      Dc{Array.set(U32, a, (o - 1 : U32), (U32.and(y, 4294967040) + c : U32)), o}
+
+def dc.s4(same: Bool, +o: U32, +x: U32, +y: U32, a: Array<U32>) -> Dc:
+  match same:
+    case True{}:
+      dc.s6(U32.and((y .^. x : U32), 255), o, y, a)
+    case False{}:
+      dc.s5(o, x, a)
+
+def dc.s3(+o: U32, +x: U32, rd: Array<U32> & U32) -> Dc:
+  (a, +y) = rd
+  dc.s4(U32.is_eq(U32.shrn(y, 8n), U32.shrn(x, 8n)), o, x, y, a)
+
+def dc.s2(has: Bool, +o: U32, +x: U32, a: Array<U32>) -> Dc:
+  match has:
+    case True{}:
+      dc.s3(o, x, Array.get(U32, a, (o - 1 : U32)))
+    case False{}:
+      dc.s5(o, x, a)
+
+def dc.s1(+s: U32, +o: U32, rd: Array<U32> & U32) -> Dc:
+  (a, x) = rd
+  dc.s2(U32.is_gt(o, s), o, x, a)
+
+def dc.step(+i: U32, +s: U32, st: Dc) -> Dc:
+  match st:
+    case Dc{a, +o}:
+      dc.s1(s, o, Array.get(U32, a, i))
+
+def dc.loop(+m: Nat, +i: U32, +s: U32, st: Dc) -> Dc:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      dc.loop(q, (i + 1 : U32), s, dc.step(i, s, st))
+
+# number of terms of a[i .. i+m) with column < lim (the sorted terms' active prefix)
+type Cn is Type:
+  Cn{a: Array<U32>, acc: U32}
+
+def cn.f(+lim: U32, +acc: U32, rd: Array<U32> & U32) -> Cn:
+  (a, x) = rd
+  Cn{a, (acc + U32.and(b2m(U32.is_lt(U32.shrn(x, 8n), lim)), 1) : U32)}
+
+def cn.step(+i: U32, +lim: U32, st: Cn) -> Cn:
+  match st:
+    case Cn{a, +acc}:
+      cn.f(lim, acc, Array.get(U32, a, i))
+
+def cn.loop(+m: Nat, +i: U32, +lim: U32, st: Cn) -> Cn:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      cn.loop(q, (i + 1 : U32), lim, cn.step(i, lim, st))
+
+# the terms are at a[cur .. cur+len): record the row (rs, rl, na = wt = active prefix length)
+type Ig is Type:
+  Ig{a: Array<U32>, dn: List<&2, Rw>, cur: U32}
+
+def ig.meta(cn: Cn, +id: U32, +cur: U32, +len: U32, +n: U32, dn: List<&2, Rw>) -> Ig:
+  match cn:
+    case Cn{a, +na}:
+      Ig{Array.set(U32, Array.set(U32, Array.set(U32, Array.set(U32, a, id, cur), (f1.rl(n) + id : U32), len), (f1.na(n) + id : U32), na), (f1.wt(n) + id : U32), na), dn, (cur + len : U32)}
+
+def ig.sparse(a: Array<U32>, +id: U32, +cur: U32, +len: U32, +n: U32, +lim: U32, dn: List<&2, Rw>) -> Ig:
+  ig.meta(cn.loop(U32.to_nat(len), cur, lim, Cn{a, 0}), id, cur, len, n, dn)
+
+# raw length <= DENSE_MIN: cannot be dense; sort + compact in place
+def ig.fin1(dc: Dc, +id: U32, +cur: U32, +n: U32, +lim: U32, dn: List<&2, Rw>) -> Ig:
+  match dc:
+    case Dc{a, +o}:
+      ig.sparse(a, id, cur, (o - cur : U32), n, lim, dn)
+
+def ig.small(+cols: List<&2, T.Term>, +rawn: U32, +id: U32, +cur: U32, +n: U32, +lim: U32, a: Array<U32>, dn: List<&2, Rw>) -> Ig:
+  ig.fin1(dc.loop(U32.to_nat(rawn), cur, cur, Dc{is.outer(U32.to_nat(U32.max((rawn - 1 : U32), 0)), 1, cur, ig.put(cols, cur, a)), cur}), id, cur, n, lim, dn)
+
+def ig.putn(ts: List<&2, T.Term>, +k: U32, a: Array<U32>) -> Array<U32>:
+  ig.put(ts, k, a)
+
+# raw length > DENSE_MIN: the old normalisation (`tsort`), then dense (Vec row) or sparse (written to the arrays)
+def ig.big2(dense: Bool, nl: List<&2, T.Term>, +cols: List<&2, T.Term>, +len: U32, +id: U32, +cur: U32, +n: U32, +lim: U32, +nw: U32, zero: G.Vec, a: Array<U32>, dn: List<&2, Rw>) -> Ig:
+  match dense:
+    case True{}:
+      Ig{Array.set(U32, a, (f1.kd(n) + id : U32), 2), Dn{id, fold_terms(cols, zero, nw)} <> dn, cur}
+    case False{}:
+      ig.sparse(ig.putn(nl, cur, a), id, cur, len, n, lim, dn)
+
+def ig.big(+nl: List<&2, T.Term>, +cols: List<&2, T.Term>, +id: U32, +cur: U32, +n: U32, +l: U32, +lim: U32, +nw: U32, zero: G.Vec, a: Array<U32>, dn: List<&2, Rw>) -> Ig:
+  +len = U32.from_nat(List.length(&2, T.Term, nl))
+  ig.big2(is_dense(len, l), nl, cols, len, id, cur, n, lim, nw, zero, a, dn)
+
+def ig.row2(bigrow: Bool, +cols: List<&2, T.Term>, +rawn: U32, +id: U32, +cur: U32, +n: U32, +l: U32, +lim: U32, +nw: U32, zero: G.Vec, a: Array<U32>, dn: List<&2, Rw>) -> Ig:
+  match bigrow:
+    case True{}:
+      ig.big(tsort(cols), cols, id, cur, n, l, lim, nw, zero, a, dn)
+    case False{}:
+      ig.small(cols, rawn, id, cur, n, lim, a, dn)
+
+def ig.row3(+cols: List<&2, T.Term>, +rawn: U32, +id: U32, +cur: U32, +n: U32, +l: U32, +lim: U32, +nw: U32, zero: G.Vec, a: Array<U32>, dn: List<&2, Rw>) -> Ig:
+  ig.row2(U32.is_gt(rawn, DENSE_MIN()), cols, rawn, id, cur, n, l, lim, nw, zero, a, dn)
+
+def ig.row(r: T.Row, +id: U32, +n: U32, +l: U32, +lim: U32, +nw: U32, zero: G.Vec, st: Ig) -> Ig:
+  match r st:
+    case T.Row{+cols, rhs} Ig{a, dn, +cur}:
+      ig.row3(cols, U32.from_nat(List.length(&2, T.Term, cols)), id, cur, n, l, lim, nw, zero, a, dn)
+
+def ig.go(rs: List<&2, T.Row>, +id: U32, +n: U32, +l: U32, +lim: U32, +nw: U32, +zero: G.Vec, st: Ig) -> Ig:
+  match rs:
+    case Nil{}:
+      st
+    case r <> rest:
+      ig.go(rest, (id + 1 : U32), n, l, lim, nw, zero, ig.row(r, id, n, l, lim, nw, zero, st))
+
+# ---- permanent columns start inactive at position c - lim ------------------------------------------------------------------------------------
+def ci.perm(+m: Nat, +c: U32, +lim: U32, +cs: U32, a: Array<U32>) -> Array<U32>:
+  match m:
+    case 0n:
+      a
+    case 1n+q:
+      ci.perm(q, (c + 1 : U32), lim, cs, Array.set(U32, a, (cs + c : U32), (2 + c - lim : U32)))
+
+# ---- the row's term range: start slot and active prefix length -----------------------------------------------------------------------------
+type Rg is Type:
+  Rg{a: Array<U32>, s: U32, m: U32}
+
+def f1.rng.f2(+s: U32, rd: Array<U32> & U32) -> Rg:
+  (a, m) = rd
+  Rg{a, s, m}
+
+def f1.rng.f1(+id: U32, +n: U32, rd: Array<U32> & U32) -> Rg:
+  (a, s) = rd
+  f1.rng.f2(s, Array.get(U32, a, (f1.na(n) + id : U32)))
+
+def f1.rng(+id: U32, +n: U32, a: Array<U32>) -> Rg:
+  f1.rng.f1(id, n, Array.get(U32, a, id))
+
+# ---- the column index (static CSR, rows of a column in DESCENDING id order, like the cons lists of the list version) -------------------------
+# B: counts at cst + 1 + col
+def pb.t1(+cst: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, x) = rd
+  f1.inc((cst + 1 + U32.shrn(x, 8n) : U32), a)
+
+def pb.t(+m: Nat, +i: U32, +cst: U32, a: Array<U32>) -> Array<U32>:
+  match m:
+    case 0n:
+      a
+    case 1n+q:
+      pb.t(q, (i + 1 : U32), cst, pb.t1(cst, Array.get(U32, a, i)))
+
+def pb.r(rg: Rg, +cst: U32) -> Array<U32>:
+  match rg:
+    case Rg{a, +s, +m}:
+      pb.t(U32.to_nat(m), s, cst, a)
+
+def pb.rows(+m: Nat, +id: U32, +n: U32, +cst: U32, a: Array<U32>) -> Array<U32>:
+  match m:
+    case 0n:
+      a
+    case 1n+q:
+      pb.rows(q, (id + 1 : U32), n, cst, pb.r(f1.rng(id, n, a), cst))
+
+# C: inclusive prefix sums over cst[1..l]; then cu[c] = cst[c]
+type Px is Type:
+  Px{a: Array<U32>, acc: U32}
+
+def px.f2(+c: U32, +cst: U32, +acc: U32, rd: Array<U32> & U32) -> Px:
+  (a, +x) = rd
+  Px{Array.set(U32, a, (cst + c : U32), (acc + x : U32)), (acc + x : U32)}
+
+def px.step(+c: U32, +cst: U32, st: Px) -> Px:
+  match st:
+    case Px{a, +acc}:
+      px.f2(c, cst, acc, Array.get(U32, a, (cst + c : U32)))
+
+def px.loop(+m: Nat, +c: U32, +cst: U32, st: Px) -> Px:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      px.loop(q, (c + 1 : U32), cst, px.step(c, cst, st))
+
+def px.fin(st: Px) -> Array<U32>:
+  match st:
+    case Px{a, acc}:
+      a
+
+def cu.f(+c: U32, +cu: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, x) = rd
+  Array.set(U32, a, (cu + c : U32), x)
+
+def cu.loop(+m: Nat, +c: U32, +cst: U32, +cu: U32, a: Array<U32>) -> Array<U32>:
+  match m:
+    case 0n:
+      a
+    case 1n+q:
+      cu.loop(q, (c + 1 : U32), cst, cu, cu.f(c, cu, Array.get(U32, a, (cst + c : U32))))
+
+# D: fill, rows in descending id order
+def fd.t2(+id: U32, +cu: U32, +cr: U32, +col: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, +idx) = rd
+  Array.set(U32, Array.set(U32, a, (cr + idx : U32), id), (cu + col : U32), (idx + 1 : U32))
+
+def fd.t1(+id: U32, +cu: U32, +cr: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, +x) = rd
+  fd.t2(id, cu, cr, U32.shrn(x, 8n), Array.get(U32, a, (cu + U32.shrn(x, 8n) : U32)))
+
+def fd.t(+m: Nat, +i: U32, +id: U32, +cu: U32, +cr: U32, a: Array<U32>) -> Array<U32>:
+  match m:
+    case 0n:
+      a
+    case 1n+q:
+      fd.t(q, (i + 1 : U32), id, cu, cr, fd.t1(id, cu, cr, Array.get(U32, a, i)))
+
+def fd.r(rg: Rg, +id: U32, +cu: U32, +cr: U32) -> Array<U32>:
+  match rg:
+    case Rg{a, +s, +m}:
+      fd.t(U32.to_nat(m), s, id, cu, cr, a)
+
+def fd.rows(+m: Nat, +id: U32, +n: U32, +cu: U32, +cr: U32, a: Array<U32>) -> Array<U32>:
+  match m:
+    case 0n:
+      a
+    case 1n+q:
+      fd.rows(q, (id - 1 : U32), n, cu, cr, fd.r(f1.rng(id, n, a), id, cu, cr))
+
+# ---- buckets: doubly linked lists of row ids (id + 1, 0 = none) by min(weight, 63); head = most recently pushed ---------------------------------
+def bk.push3(+b: U32, +id: U32, +n: U32, +bh: U32, +old: U32, a: Array<U32>) -> Array<U32>:
+  match old:
+    case 0:
+      Array.set(U32, Array.set(U32, Array.set(U32, a, (f1.bn(n) + id : U32), 0), (f1.bp(n) + id : U32), 0), (bh + b : U32), (id + 1 : U32))
+    case _:
+      Array.set(U32, Array.set(U32, Array.set(U32, Array.set(U32, a, (f1.bn(n) + id : U32), old), (f1.bp(n) + id : U32), 0), (f1.bp(n) + old - 1 : U32), (id + 1 : U32)), (bh + b : U32), (id + 1 : U32))
+
+def bk.push2(+b: U32, +id: U32, +n: U32, +bh: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, old) = rd
+  bk.push3(b, id, n, bh, old, a)
+
+def bk.push(+b: U32, +id: U32, +n: U32, +bh: U32, a: Array<U32>) -> Array<U32>:
+  bk.push2(b, id, n, bh, Array.get(U32, a, (bh + b : U32)))
+
+# unlink id from bucket b: prev.next = next (or head = next), next.prev = prev
+def bk.un4(go: Bool, +nx: U32, +pv: U32, +n: U32, a: Array<U32>) -> Array<U32>:
+  match go:
+    case True{}:
+      Array.set(U32, a, (f1.bp(n) + nx - 1 : U32), pv)
+    case False{}:
+      a
+
+def bk.un3(pvnil: Bool, +b: U32, +id: U32, +n: U32, +bh: U32, +nx: U32, +pv: U32, a: Array<U32>) -> Array<U32>:
+  match pvnil:
+    case True{}:
+      bk.un4(U32.is_ne(nx, 0), nx, pv, n, Array.set(U32, a, (bh + b : U32), nx))
+    case False{}:
+      bk.un4(U32.is_ne(nx, 0), nx, pv, n, Array.set(U32, a, (f1.bn(n) + pv - 1 : U32), nx))
+
+def bk.un2(+b: U32, +id: U32, +n: U32, +bh: U32, +nx: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, +pv) = rd
+  bk.un3(U32.is_eq(pv, 0), b, id, n, bh, nx, pv, a)
+
+def bk.un1(+b: U32, +id: U32, +n: U32, +bh: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, nx) = rd
+  bk.un2(b, id, n, bh, nx, Array.get(U32, a, (f1.bp(n) + id : U32)))
+
+def bk.unlink(+b: U32, +id: U32, +n: U32, +bh: U32, a: Array<U32>) -> Array<U32>:
+  bk.un1(b, id, n, bh, Array.get(U32, a, (f1.bn(n) + id : U32)))
+
+# E: initial buckets, rows in ascending id order
+def be.r3(go: Bool, +b: U32, +id: U32, +n: U32, +bh: U32, a: Array<U32>) -> Array<U32>:
+  match go:
+    case True{}:
+      bk.push(b, id, n, bh, a)
+    case False{}:
+      a
+
+def be.r2(+id: U32, +n: U32, +bh: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, +w) = rd
+  be.r3(U32.is_ne(w, 0), bkt(w), id, n, bh, a)
+
+def be.rows(+m: Nat, +id: U32, +n: U32, +bh: U32, a: Array<U32>) -> Array<U32>:
+  match m:
+    case 0n:
+      a
+    case 1n+q:
+      be.rows(q, (id + 1 : U32), n, bh, be.r2(id, n, bh, Array.get(U32, a, (f1.wt(n) + id : U32))))
+
+# ---- the pivot loop -----------------------------------------------------------------------------------------------------------------------
+# lowest non-empty bucket >= 1: Pw{a, w, h}, h = head (id + 1) or 0 when every bucket is empty
+type Pw is Type:
+  Pw{a: Array<U32>, w: U32, h: U32}
+
+def pk.f(+w: U32, rd: Array<U32> & U32) -> Pw:
+  (a, h) = rd
+  Pw{a, w, h}
+
+def pk.s2(has: Bool, +bh: U32, +w: U32, +h: U32, a: Array<U32>) -> Pw:
+  match has:
+    case True{}:
+      Pw{a, w, h}
+    case False{}:
+      pk.f((w + 1 : U32), Array.get(U32, a, (bh + w + 1 : U32)))
+
+def pk.step(+bh: U32, st: Pw) -> Pw:
+  match st:
+    case Pw{a, +w, +h}:
+      pk.s2(U32.is_ne(h, 0), bh, w, h, a)
+
+def pk.go(+m: Nat, +bh: U32, st: Pw) -> Pw:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      pk.go(q, bh, pk.step(bh, st))
+
+def pk.run(+bh: U32, a: Array<U32>) -> Pw:
+  pk.go(62n, bh, pk.f(1, Array.get(U32, a, (bh + 1 : U32))))
+
+# scan the pivot row's active prefix: the first column still active is the pivot column (first = col + 1, pcf = its coefficient), every other
+# active column is inactivated at position p + nin
+type Sn is Type:
+  Sn{a: Array<U32>, nin: U32, first: U32, pcf: U32}
+
+def sn.t2c(isfirst: Bool, +col: U32, +coef: U32, +jn: U32, +p: U32, +cj: U32, +cs: U32, +ic: U32, +nin: U32, +first: U32, +pcf: U32, a: Array<U32>) -> Sn:
+  match isfirst:
+    case True{}:
+      Sn{Array.set(U32, Array.set(U32, a, (cs + col : U32), 1), (cj + col : U32), jn), nin, (col + 1 : U32), coef}
+    case False{}:
+      Sn{Array.set(U32, Array.set(U32, a, (cs + col : U32), (2 + p + nin : U32)), (ic + nin : U32), col), (nin + 1 : U32), first, pcf}
+
+def sn.t2b(active: Bool, +col: U32, +coef: U32, +jn: U32, +p: U32, +cj: U32, +cs: U32, +ic: U32, +nin: U32, +first: U32, +pcf: U32, a: Array<U32>) -> Sn:
+  match active:
+    case False{}:
+      Sn{a, nin, first, pcf}
+    case True{}:
+      sn.t2c(U32.is_eq(first, 0), col, coef, jn, p, cj, cs, ic, nin, first, pcf, a)
+
+def sn.t2(+col: U32, +coef: U32, +jn: U32, +p: U32, +cj: U32, +cs: U32, +ic: U32, +nin: U32, +first: U32, +pcf: U32, rd: Array<U32> & U32) -> Sn:
+  (a, c) = rd
+  sn.t2b(U32.is_eq(c, 0), col, coef, jn, p, cj, cs, ic, nin, first, pcf, a)
+
+def sn.t0(+jn: U32, +p: U32, +cj: U32, +cs: U32, +ic: U32, +nin: U32, +first: U32, +pcf: U32, rd: Array<U32> & U32) -> Sn:
+  (a, +x) = rd
+  sn.t2(U32.shrn(x, 8n), U32.and(x, 255), jn, p, cj, cs, ic, nin, first, pcf, Array.get(U32, a, (cs + U32.shrn(x, 8n) : U32)))
+
+def sn.t1(+jn: U32, +p: U32, +cj: U32, +cs: U32, +ic: U32, +i: U32, st: Sn) -> Sn:
+  match st:
+    case Sn{a, +nin, +first, +pcf}:
+      sn.t0(jn, p, cj, cs, ic, nin, first, pcf, Array.get(U32, a, i))
+
+def sn.loop(+m: Nat, +i: U32, +jn: U32, +p: U32, +cj: U32, +cs: U32, +ic: U32, st: Sn) -> Sn:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      sn.loop(q, (i + 1 : U32), jn, p, cj, cs, ic, sn.t1(jn, p, cj, cs, ic, i, st))
+
+# every live sparse row of the removed column loses it: weight -1; the first touch in a step records the old weight and the row (touched list)
+type Tc is Type:
+  Tc{a: Array<U32>, cnt: U32}
+
+def rw.s3(+r: U32, +stamp: U32, +n: U32, +cnt: U32, rd: Array<U32> & U32) -> Tc:
+  (a, +w) = rd
+  Tc{Array.set(U32, Array.set(U32, Array.set(U32, Array.set(U32, a, (f1.ow(n) + r : U32), w), (f1.st(n) + r : U32), stamp), (f1.tl(n) + cnt : U32), r), (f1.wt(n) + r : U32), (w - 1 : U32)), (cnt + 1 : U32)}
+
+def rw.d1(+r: U32, +n: U32, +cnt: U32, rd: Array<U32> & U32) -> Tc:
+  (a, w) = rd
+  Tc{Array.set(U32, a, (f1.wt(n) + r : U32), (w - 1 : U32)), cnt}
+
+def rw.s2(first: Bool, +r: U32, +stamp: U32, +n: U32, +cnt: U32, a: Array<U32>) -> Tc:
+  match first:
+    case True{}:
+      rw.s3(r, stamp, n, cnt, Array.get(U32, a, (f1.wt(n) + r : U32)))
+    case False{}:
+      rw.d1(r, n, cnt, Array.get(U32, a, (f1.wt(n) + r : U32)))
+
+def rw.s1(+r: U32, +stamp: U32, +n: U32, +cnt: U32, rd: Array<U32> & U32) -> Tc:
+  (a, sv) = rd
+  rw.s2(U32.is_ne(sv, stamp), r, stamp, n, cnt, a)
+
+def rw.k2(live: Bool, +r: U32, +stamp: U32, +n: U32, +cnt: U32, a: Array<U32>) -> Tc:
+  match live:
+    case True{}:
+      rw.s1(r, stamp, n, cnt, Array.get(U32, a, (f1.st(n) + r : U32)))
+    case False{}:
+      Tc{a, cnt}
+
+def rw.k1(+r: U32, +stamp: U32, +n: U32, +cnt: U32, rd: Array<U32> & U32) -> Tc:
+  (a, k) = rd
+  rw.k2(U32.is_eq(k, 0), r, stamp, n, cnt, a)
+
+def rw.at2(+stamp: U32, +n: U32, +cnt: U32, rd: Array<U32> & U32) -> Tc:
+  (a, +r) = rd
+  rw.k1(r, stamp, n, cnt, Array.get(U32, a, (f1.kd(n) + r : U32)))
+
+def rw.at(+i: U32, +stamp: U32, +n: U32, +cr: U32, st: Tc) -> Tc:
+  match st:
+    case Tc{a, +cnt}:
+      rw.at2(stamp, n, cnt, Array.get(U32, a, (cr + i : U32)))
+
+def rw.col(+m: Nat, +i: U32, +stamp: U32, +n: U32, +cr: U32, st: Tc) -> Tc:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      rw.col(q, (i + 1 : U32), stamp, n, cr, rw.at(i, stamp, n, cr, st))
+
+def rw.pc2(+s: U32, +stamp: U32, +n: U32, +cr: U32, +cnt: U32, rd: Array<U32> & U32) -> Tc:
+  (a, e) = rd
+  rw.col(U32.to_nat((e - s : U32)), s, stamp, n, cr, Tc{a, cnt})
+
+def rw.pc1(+col: U32, +stamp: U32, +n: U32, +l: U32, +cr: U32, +cnt: U32, rd: Array<U32> & U32) -> Tc:
+  (a, +s) = rd
+  rw.pc2(s, stamp, n, cr, cnt, Array.get(U32, a, (f1.cst(n, l) + col + 1 : U32)))
+
+# all live rows in the index list of one column
+def rw.pcol(+col: U32, +stamp: U32, +n: U32, +l: U32, +cr: U32, st: Tc) -> Tc:
+  match st:
+    case Tc{a, +cnt}:
+      rw.pc1(col, stamp, n, l, cr, cnt, Array.get(U32, a, (f1.cst(n, l) + col : U32)))
+
+# the inactivated columns of this step, last first (ic[pos], pos = nin1-1 down to nin0)
+def rw.in2(+pos: U32, +stamp: U32, +n: U32, +l: U32, +cr: U32, +cnt: U32, rd: Array<U32> & U32) -> Tc:
+  (a, +col) = rd
+  rw.pcol(col, stamp, n, l, cr, Tc{a, cnt})
+
+def rw.in1(+pos: U32, +stamp: U32, +n: U32, +l: U32, +cr: U32, st: Tc) -> Tc:
+  match st:
+    case Tc{a, +cnt}:
+      rw.in2(pos, stamp, n, l, cr, cnt, Array.get(U32, a, (f1.ic(n, l) + pos : U32)))
+
+def rw.inact(+m: Nat, +pos: U32, +stamp: U32, +n: U32, +l: U32, +cr: U32, st: Tc) -> Tc:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      rw.inact(q, (pos - 1 : U32), stamp, n, l, cr, rw.in1(pos, stamp, n, l, cr, st))
+
+# second pass over the touched rows (in order of first touch): move to the bucket of the new weight (head), none when the weight is 0
+def rl.p4(go: Bool, +r: U32, +w: U32, +n: U32, +l: U32, a: Array<U32>) -> Array<U32>:
+  match go:
+    case True{}:
+      bk.push(bkt(w), r, n, f1.bh(n, l), a)
+    case False{}:
+      a
+
+def rl.p3(+r: U32, +w: U32, +n: U32, +l: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, +ow) = rd
+  rl.p4(U32.is_ne(w, 0), r, w, n, l, bk.unlink(bkt(ow), r, n, f1.bh(n, l), a))
+
+def rl.p2(+r: U32, +n: U32, +l: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, +w) = rd
+  rl.p3(r, w, n, l, Array.get(U32, a, (f1.ow(n) + r : U32)))
+
+def rl.p1(+n: U32, +l: U32, rd: Array<U32> & U32) -> Array<U32>:
+  (a, +r) = rd
+  rl.p2(r, n, l, Array.get(U32, a, (f1.wt(n) + r : U32)))
+
+def rl.loop(+m: Nat, +k: U32, +n: U32, +l: U32, a: Array<U32>) -> Array<U32>:
+  match m:
+    case 0n:
+      a
+    case 1n+q:
+      rl.loop(q, (k + 1 : U32), n, l, rl.p1(n, l, Array.get(U32, a, (f1.tl(n) + k : U32))))
+
+# one pivot step on row id (popped from bucket w): n rows, l columns, p permanent columns, cr = offset of the index rows, nin = columns inactivated so
+# far, jn = pivots so far.  Lp{a, nin, jn, done}
+type Lp is Type:
+  Lp{a: Array<U32>, nin: U32, jn: U32, done: U32}
+
+def pv.fin(tc: Tc, +n: U32, +l: U32, +nin1: U32, +jn: U32) -> Lp:
+  match tc:
+    case Tc{a, +cnt}:
+      Lp{rl.loop(U32.to_nat(cnt), 0, n, l, a), nin1, (jn + 1 : U32), 0}
+
+# the pivot column's own index list last
+def pv.s3(sn: Sn, +id: U32, +n: U32, +l: U32, +p: U32, +cr: U32, +nin0: U32, +jn: U32) -> Lp:
+  match sn:
+    case Sn{a, +nin1, +first, +pcf}:
+      pv.fin(rw.pcol((first - 1 : U32), (jn + 1 : U32), n, l, cr, rw.inact(U32.to_nat((nin1 - nin0 : U32)), (nin1 - 1 : U32), (jn + 1 : U32), n, l, cr, Tc{Array.set(U32, Array.set(U32, Array.set(U32, a, (f1.pr(n) + jn : U32), id), (f1.pf(n) + jn : U32), pcf), (f1.pcl(n) + jn : U32), (first - 1 : U32)), 0})), n, l, nin1, jn)
+
+def pv.s2(rg: Rg, +id: U32, +n: U32, +l: U32, +p: U32, +cr: U32, +nin0: U32, +jn: U32) -> Lp:
+  match rg:
+    case Rg{a, +s, +m}:
+      pv.s3(sn.loop(U32.to_nat(m), s, jn, p, f1.cj(n, l), f1.cs(n), f1.ic(n, l), Sn{a, nin0, 0, 0}), id, n, l, p, cr, nin0, jn)
+
+def pv.s1(+id: U32, +n: U32, +l: U32, +p: U32, +cr: U32, +nin0: U32, +jn: U32, a: Array<U32>) -> Lp:
+  pv.s2(f1.rng(id, n, Array.set(U32, Array.set(U32, a, (f1.kd(n) + id : U32), 1), (f1.wt(n) + id : U32), 0)), id, n, l, p, cr, nin0, jn)
+
+def lp.s3(go: Bool, +w: U32, +h: U32, +n: U32, +l: U32, +p: U32, +cr: U32, +nin: U32, +jn: U32, a: Array<U32>) -> Lp:
+  match go:
+    case True{}:
+      pv.s1((h - 1 : U32), n, l, p, cr, nin, jn, bk.unlink(w, (h - 1 : U32), n, f1.bh(n, l), a))
+    case False{}:
+      Lp{a, nin, jn, 1}
+
+def lp.s2(pw: Pw, +n: U32, +l: U32, +p: U32, +cr: U32, +nin: U32, +jn: U32) -> Lp:
+  match pw:
+    case Pw{a, +w, +h}:
+      lp.s3(U32.is_ne(h, 0), w, h, n, l, p, cr, nin, jn, a)
+
+def lp.s1(done: Bool, +n: U32, +l: U32, +p: U32, +cr: U32, +nin: U32, +jn: U32, a: Array<U32>) -> Lp:
+  match done:
+    case True{}:
+      Lp{a, nin, jn, 1}
+    case False{}:
+      lp.s2(pk.run(f1.bh(n, l), a), n, l, p, cr, nin, jn)
+
+def lp.step(+n: U32, +l: U32, +p: U32, +cr: U32, st: Lp) -> Lp:
+  match st:
+    case Lp{a, +nin, +jn, +done}:
+      lp.s1(U32.is_ne(done, 0), n, l, p, cr, nin, jn, a)
+
+def lp.loop(+m: Nat, +n: U32, +l: U32, +p: U32, +cr: U32, st: Lp) -> Lp:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      lp.loop(q, n, l, p, cr, lp.step(n, l, p, cr, st))
+
+# ---- after the loop: the lists phase 2 consumes (Pv per pivot newest first, leftover Sp rows ascending, inactivated columns newest first) -------------
+# a row's terms (last to first, so `oc` comes out ascending): oc = all terms, a term in a pivot column of an earlier pivot j2 is a log entry
+# (coefficient / frozen coefficient of that pivot), a term in an inactivated column an own term at its position; j = the row's own pivot
+# number (its pivot column is neither), or 4294967295 for a row that is not a pivot
+type Pb is Type:
+  Pb{a: Array<U32>, oc: List<&2, T.Term>, own: List<&2, T.Term>, log: List<&2, Lg>}
+
+def pq.t5(+coef: U32, +jj: U32, oc: List<&2, T.Term>, own: List<&2, T.Term>, log: List<&2, Lg>, rd: Array<U32> & U32) -> Pb:
+  (a, +pfv) = rd
+  Pb{a, oc, own, Lg{G.div(coef, pfv), jj} <> log}
+
+def pq.t4(same: Bool, +coef: U32, +jj: U32, +n: U32, oc: List<&2, T.Term>, own: List<&2, T.Term>, log: List<&2, Lg>, a: Array<U32>) -> Pb:
+  match same:
+    case True{}:
+      Pb{a, oc, own, log}
+    case False{}:
+      pq.t5(coef, jj, oc, own, log, Array.get(U32, a, (f1.pf(n) + jj : U32)))
+
+def pq.t3(+coef: U32, +j: U32, +n: U32, oc: List<&2, T.Term>, own: List<&2, T.Term>, log: List<&2, Lg>, rd: Array<U32> & U32) -> Pb:
+  (a, +jj) = rd
+  pq.t4(U32.is_eq(jj, j), coef, jj, n, oc, own, log, a)
+
+def pq.t2b(kind: U32, +col: U32, +coef: U32, +j: U32, +n: U32, +l: U32, oc: List<&2, T.Term>, own: List<&2, T.Term>, log: List<&2, Lg>, a: Array<U32>) -> Pb:
+  match kind:
+    case 0:
+      Pb{a, oc, own, log}
+    case 1:
+      pq.t3(coef, j, n, oc, own, log, Array.get(U32, a, (f1.cj(n, l) + col : U32)))
+    case _:
+      Pb{a, oc, T.Term{(kind - 2 : U32), coef} <> own, log}
+
+def pq.t2(+col: U32, +coef: U32, +j: U32, +n: U32, +l: U32, oc: List<&2, T.Term>, own: List<&2, T.Term>, log: List<&2, Lg>, rd: Array<U32> & U32) -> Pb:
+  (a, k) = rd
+  pq.t2b(k, col, coef, j, n, l, oc, own, log, a)
+
+def pq.t1(+j: U32, +n: U32, +l: U32, rd: Array<U32> & U32, oc: List<&2, T.Term>, own: List<&2, T.Term>, log: List<&2, Lg>) -> Pb:
+  (a, +x) = rd
+  pq.t2(U32.shrn(x, 8n), U32.and(x, 255), j, n, l, T.Term{U32.shrn(x, 8n), U32.and(x, 255)} <> oc, own, log, Array.get(U32, a, (f1.cs(n) + U32.shrn(x, 8n) : U32)))
+
+def pq.step(+i: U32, +j: U32, +n: U32, +l: U32, st: Pb) -> Pb:
+  match st:
+    case Pb{a, oc, own, log}:
+      pq.t1(j, n, l, Array.get(U32, a, i), oc, own, log)
+
+def pq.loop(+m: Nat, +i: U32, +j: U32, +n: U32, +l: U32, st: Pb) -> Pb:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      pq.loop(q, (i - 1 : U32), j, n, l, pq.step(i, j, n, l, st))
+
+def pq.r2(+s: U32, +j: U32, +n: U32, +l: U32, rd: Array<U32> & U32) -> Pb:
+  (a, +len) = rd
+  pq.loop(U32.to_nat(len), (s + len - 1 : U32), j, n, l, Pb{a, Nil{}, Nil{}, Nil{}})
+
+def pq.r1(+id: U32, +j: U32, +n: U32, +l: U32, rd: Array<U32> & U32) -> Pb:
+  (a, +s) = rd
+  pq.r2(s, j, n, l, Array.get(U32, a, (f1.rl(n) + id : U32)))
+
+def pq.row(+id: U32, +j: U32, +n: U32, +l: U32, a: Array<U32>) -> Pb:
+  pq.r1(id, j, n, l, Array.get(U32, a, id))
+
+# Pv list, pivots 0..np-1 ascending so the list is newest first
+type Po is Type:
+  Po{a: Array<U32>, pvs: List<&2, Pv>}
+
+def po.f3(pb: Pb, +id: U32, +pc: U32, +pcf: U32, pvs: List<&2, Pv>) -> Po:
+  match pb:
+    case Pb{a, oc, own, log}:
+      Po{a, Pv{pc, pcf, own, log, oc, id} <> pvs}
+
+def po.f2(+id: U32, +pcf: U32, +j: U32, +n: U32, +l: U32, pvs: List<&2, Pv>, rd: Array<U32> & U32) -> Po:
+  (a, +pc) = rd
+  po.f3(pq.row(id, j, n, l, a), id, pc, pcf, pvs)
+
+def po.f1(+id: U32, +j: U32, +n: U32, +l: U32, pvs: List<&2, Pv>, rd: Array<U32> & U32) -> Po:
+  (a, +pcf) = rd
+  po.f2(id, pcf, j, n, l, pvs, Array.get(U32, a, (f1.pcl(n) + j : U32)))
+
+def po.f0(+j: U32, +n: U32, +l: U32, pvs: List<&2, Pv>, rd: Array<U32> & U32) -> Po:
+  (a, +id) = rd
+  po.f1(id, j, n, l, pvs, Array.get(U32, a, (f1.pf(n) + j : U32)))
+
+def po.step(+j: U32, +n: U32, +l: U32, st: Po) -> Po:
+  match st:
+    case Po{a, pvs}:
+      po.f0(j, n, l, pvs, Array.get(U32, a, (f1.pr(n) + j : U32)))
+
+def po.loop(+m: Nat, +j: U32, +n: U32, +l: U32, st: Po) -> Po:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      po.loop(q, (j + 1 : U32), n, l, po.step(j, n, l, st))
+
+# leftover sparse rows (kd = 0), ids n-1 down to 0 so the list is ascending
+type Lo2 is Type:
+  Lo2{a: Array<U32>, rs: List<&2, Rw>}
+
+def lo.f2(pb: Pb, +id: U32, rs: List<&2, Rw>) -> Lo2:
+  match pb:
+    case Pb{a, oc, own, log}:
+      Lo2{a, Sp{id, 0, Nil{}, own, log, oc} <> rs}
+
+def lo.f1(live: Bool, +id: U32, +n: U32, +l: U32, rs: List<&2, Rw>, a: Array<U32>) -> Lo2:
+  match live:
+    case True{}:
+      lo.f2(pq.row(id, 4294967295, n, l, a), id, rs)
+    case False{}:
+      Lo2{a, rs}
+
+def lo.f0(+id: U32, +n: U32, +l: U32, rs: List<&2, Rw>, rd: Array<U32> & U32) -> Lo2:
+  (a, k) = rd
+  lo.f1(U32.is_eq(k, 0), id, n, l, rs, a)
+
+def lo.step(+id: U32, +n: U32, +l: U32, st: Lo2) -> Lo2:
+  match st:
+    case Lo2{a, rs}:
+      lo.f0(id, n, l, rs, Array.get(U32, a, (f1.kd(n) + id : U32)))
+
+def lo.loop(+m: Nat, +id: U32, +n: U32, +l: U32, st: Lo2) -> Lo2:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      lo.loop(q, (id - 1 : U32), n, l, lo.step(id, n, l, st))
+
+# inactivated columns newest first: ic[0 .. nin) ascending, consed
+type Il is Type:
+  Il{a: Array<U32>, il: List<&2, U32>}
+
+def il.f(rd: Array<U32> & U32, il: List<&2, U32>) -> Il:
+  (a, c) = rd
+  Il{a, c <> il}
+
+def il.step(+pos: U32, +n: U32, +l: U32, st: Il) -> Il:
+  match st:
+    case Il{a, il}:
+      il.f(Array.get(U32, a, (f1.ic(n, l) + pos : U32)), il)
+
+def il.loop(+m: Nat, +pos: U32, +n: U32, +l: U32, st: Il) -> Il:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      il.loop(q, (pos + 1 : U32), n, l, il.step(pos, n, l, st))
+
+# ---- driver: flat phase 1, then the same phase 2 as the list version ---------------------------------------------------------------------
+def f1.tcap(rs: List<&2, T.Row>, +acc: U32) -> U32:
+  match rs:
+    case Nil{}:
+      acc
+    case r <> rest:
+      match r:
+        case T.Row{cols, rhs}:
+          f1.tcap(rest, (acc + U32.from_nat(List.length(&2, T.Term, cols)) : U32))
+
+def f1.fin4(il: Il, rs: List<&2, Rw>, pvs: List<&2, Pv>, +p: U32, +l: U32, dn: List<&2, Rw>, +nrows: U32, +nw: U32) -> Maybe<&2, Plan>:
+  match il:
+    case Il{a, ils}:
+      phase2(rs, dn, pvs, ils, p, l, nrows, nw)
+
+def f1.fin3(lo2: Lo2, pvs: List<&2, Pv>, +nin: U32, +n: U32, +l: U32, +p: U32, dn: List<&2, Rw>, +nrows: U32, +nw: U32) -> Maybe<&2, Plan>:
+  match lo2:
+    case Lo2{a, rs}:
+      f1.fin4(il.loop(U32.to_nat(nin), 0, n, l, Il{a, Nil{}}), rs, pvs, p, l, dn, nrows, nw)
+
+def f1.fin2(po: Po, +nin: U32, +n: U32, +l: U32, +p: U32, dn: List<&2, Rw>, +nrows: U32, +nw: U32) -> Maybe<&2, Plan>:
+  match po:
+    case Po{a, pvs}:
+      f1.fin3(lo.loop(U32.to_nat(n), (n - 1 : U32), n, l, Lo2{a, Nil{}}), pvs, nin, n, l, p, dn, nrows, nw)
+
+def f1.fin(lp: Lp, +n: U32, +l: U32, +p: U32, dn: List<&2, Rw>, +nrows: U32, +nw: U32) -> Maybe<&2, Plan>:
+  match lp:
+    case Lp{a, +nin, +jn, done}:
+      f1.fin2(po.loop(U32.to_nat(jn), 0, n, l, Po{a, Nil{}}), nin, n, l, p, dn, nrows, nw)
+
+def f1.s3(a: Array<U32>, dn: List<&2, Rw>, +n: U32, +l: U32, +p: U32, +t: U32, +nrows: U32, +nw: U32) -> Maybe<&2, Plan>:
+  +cst = f1.cst(n, l)
+  +cr = (f1.ct(n, l) + t : U32)
+  f1.fin(lp.loop(U32.to_nat(n), n, l, p, cr, Lp{be.rows(U32.to_nat(n), 0, n, f1.bh(n, l), fd.rows(U32.to_nat(n), (n - 1 : U32), n, f1.cu(n, l), cr, cu.loop(U32.to_nat(l), 0, cst, f1.cu(n, l), px.fin(px.loop(U32.to_nat(l), 1, cst, Px{pb.rows(U32.to_nat(n), 0, n, cst, a), 0}))))), 0, 0, 0}), n, l, p, dn, nrows, nw)
+
+def f1.s2(ig: Ig, +n: U32, +l: U32, +p: U32, +t: U32, +nrows: U32, +nw: U32) -> Maybe<&2, Plan>:
+  match ig:
+    case Ig{a, dn, cur}:
+      f1.s3(a, dn, n, l, p, t, nrows, nw)
+
+def f1.s1(+l: U32, +p: U32, +n: U32, +t: U32, rows: List<&2, T.Row>, +nw: U32) -> Maybe<&2, Plan>:
+  +lim = (l - p : U32)
+  f1.s2(ig.go(rows, 0, n, l, lim, nw, zero_vec(nw), Ig{ci.perm(U32.to_nat(p), lim, lim, f1.cs(n), Array.new(U32, clog(f1.size(n, l, t)), 0)), Nil{}, f1.ct(n, l)}), n, l, p, t, n, nw)
+
+def plan_go_flat.go(+l: U32, +p: U32, +nrows: U32, +rows: List<&2, T.Row>, +nw: U32) -> Maybe<&2, Plan>:
+  f1.s1(l, p, nrows, f1.tcap(rows, 0), rows, nw)
+
+def plan_go_flat(+l: U32, +p: U32, +nrows: U32, rows: List<&2, T.Row>) -> Maybe<&2, Plan>:
+  plan_go_flat.go(l, p, nrows, rows, nwords(l))
+
+# The symbol-independent part of the inactivation solve (RFC 5.4.2.2): only the coefficients (`cols`) of the rows are
+# looked at, the rhs symbols are ignored (callers may pass G.VNil{}).  p = number of permanently inactive columns
+# (the last p columns).  None if rank < l.  Row i of the system is rhs symbol i of Solver.apply.  Phase 1 runs on flat arrays (section 6b).
+def Solver.plan(+l: U32, +p: U32, +rows: List<&2, T.Row>) -> Maybe<&2, Plan>:
+  plan_go_flat(l, p, U32.from_nat(List.length(&2, T.Row, rows)), rows)
 
 # ===========================================================================
 # 9. Solver.apply: the plan replayed on symbols, on ONE flat Array<U32> (the symbol arena)

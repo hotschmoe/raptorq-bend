@@ -3,11 +3,11 @@
 #                                                      a quarter of the source packets of every block, decode it back
 #   bend src/blocks_demo.bend -o build/blocks_demo
 #   ./build/blocks_demo [--threads W] -- bench Z K T [pat [W [fused]]]
-#        Z source blocks of K symbols of T octets (T a multiple of 4; the object is Z*K*T octets, N = 1, Al = 4), W workers:
+#        Z source blocks of K symbols of T octets (T a multiple of 4; the object is Z*K*T octets, N = 1, Al = 4):
 #        phases (wall ms each): gen (source symbols, parallel), enc (plans + all blocks), rep (K*7/8 repair symbols per block),
 #        dec (decode from K symbols per block, 7/8 of them repair), then an untimed verification.  pat = 0: every block receives
 #        the same ESIs (one shared plan per K), pat = 1: a different ESI set per block (every block builds its own plan);
-#        W = workers of the block tree (default: --threads), fused = 1: encode_repair instead of encode_syms + repair.
+#        W = leaf tasks of the block tree (default Z), fused = 1: encode_repair instead of encode_syms + repair.
 # Prints one machine-readable line:  BLOCKS Z=.. K=.. T=.. w=.. pat=.. gen_ms=.. enc_ms=.. rep_ms=.. dec_ms=.. ok=1
 import Base
 import ./gf256.bend as G
@@ -492,13 +492,13 @@ def first_char(s: String) -> U32:
 def or_w(+x: U32, +w: U32) -> U32:
   Bool.pick(U32, U32.is_eq(x, 0), w, x)
 
-# bench Z K T [pat [W [fused]]]: pat = 1: a different ESI set per block (default 0: the same everywhere); W = worker count of the
-#   block tree (0 = the thread count of the process); fused = 1: Blocks.encode_repair instead of encode_syms + repair
+# bench Z K T [pat [W [fused]]]: pat = 1: a different ESI set per block (default 0: the same everywhere); W = number of leaf tasks of the
+#   block tree (0 = Z: every block its own task, which balanced best, docs/multiblock.md); fused = 1: Blocks.encode_repair instead of encode_syms + repair
 # text (also the default): the text demo
 def run_cmd(+c: U32, +ns: List<&2, U32>, +w: U32) -> IO(Unit):
   match c:
     case 98:
-      bench(nth_u32(ns, 0, 8), nth_u32(ns, 1, 100), nth_u32(ns, 2, 64), or_w(nth_u32(ns, 4, 0), w), nth_u32(ns, 3, 0), nth_u32(ns, 5, 0))
+      bench(nth_u32(ns, 0, 8), nth_u32(ns, 1, 100), nth_u32(ns, 2, 64), or_w(nth_u32(ns, 4, 0), nth_u32(ns, 0, 8)), nth_u32(ns, 3, 0), nth_u32(ns, 5, 0))
     case _:
       text(1, w)
 

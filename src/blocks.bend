@@ -6,14 +6,14 @@
 #   Blocks.params(f, p, al, ws, ss)   -> Maybe<Oti>: T, Z, N derived from F, P', Al, WS, SS                    RFC 4.3
 #   Blocks.oti(f, t, z, n, al)        -> Maybe<Oti> (validated), Blocks.oti_bytes / oti_parse: the 12 octets of RFC 3.3.2 / 3.3.3
 #   Blocks.layout(oti)                -> Lay{kt, kl, ks, zl, zs}; Blocks.block_k(lay, sbn) = K of source block sbn
-#   Blocks.encode_object(w, oti, data)-> Maybe<Obj>   bytes -> source blocks -> one encoder per block, w = worker count
+#   Blocks.encode_object(w, oti, data)-> Maybe<Obj>   bytes -> source blocks -> one encoder per block, w = leaf tasks
 #   Blocks.encode_syms(w, oti, src)   -> Maybe<Obj>   same from the source symbols of every block (List<List<Sym>>)
 #   Blocks.symbol(obj, sbn, esi)      -> Maybe<Sym>   Blocks.repair(w, obj, n) -> n repair symbols of EVERY block (parallel)
 #   Blocks.decode_object(w, oti, pkts)-> Maybe<bytes> pkts: List<Pkt{sbn, esi, sym}> in any order; Blocks.decode_syms -> source symbols
 #
 # Parallelism (docs/multiblock.md): blocks are independent.  Every parallel function is ONE divide-and-conquer over the block range
-# [0, Z) with `w` workers: a node splits its blocks proportionally to the workers (w/2 : w - w/2), forks both halves and appends
-# the result lists; a leaf (one worker) runs its blocks in a plain tail-recursive loop.  The first fork is the only one reached
+# [0, Z) with `w` leaf tasks (w = Z: every block its own task; w = 1: sequential): a node splits its blocks proportionally to the
+# workers (w/2 : w - w/2), forks both halves and appends the result lists; a leaf runs its blocks in a plain tail-recursive loop.  The first fork is the only one reached
 # from sequential code; all others happen inside running tasks.  The decoder also routes the received packets down the same
 # tree (partition by SBN at every node), so no shared array or list is scanned per block.
 # The plan (symbol-independent half of the solve) depends only on K (and the received ESIs), so it is computed ONCE per distinct
