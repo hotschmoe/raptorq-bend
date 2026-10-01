@@ -1,0 +1,96 @@
+## C baselines (min of 3 internal)
+C T=1024 xor_scalar     5.82 ms   23.049 GB/s   44.43 ns/op   0.17 ns/word(4B)
+C T=1024 xor_neon       5.67 ms   23.658 GB/s   43.28 ns/op   0.17 ns/word(4B)
+C T=1024 mul_table     94.95 ms    1.414 GB/s  724.39 ns/op   2.83 ns/word(4B)
+C T=1024 mul_swar     151.36 ms    0.887 GB/s  1154.77 ns/op   4.51 ns/word(4B)
+C T=1024 mul_neon      12.65 ms   10.611 GB/s   96.50 ns/op   0.38 ns/word(4B)
+C T=16 xor_scalar    26.87 ms    4.995 GB/s    3.20 ns/op   0.80 ns/word(4B)
+C T=16 xor_neon      26.86 ms    4.997 GB/s    3.20 ns/op   0.80 ns/word(4B)
+C T=16 mul_table    100.84 ms    1.331 GB/s   12.02 ns/op   3.01 ns/word(4B)
+C T=16 mul_swar     178.39 ms    0.752 GB/s   21.27 ns/op   5.32 ns/word(4B)
+C T=16 mul_neon      57.15 ms    2.349 GB/s    6.81 ns/op   1.70 ns/word(4B)
+C repair-gen model T=1024 N=1000 (7 xors each, neon): 0.510 ms
+C repair-gen model T=16 N=1000 (7 xors each, neon): 0.018 ms
+C T=1024 xor_bytewise_novec   107.26 ms    1.251 GB/s  818.34 ns/op   3.20 ns/word(4B)
+C T=16 xor_bytewise_novec    83.93 ms    1.599 GB/s   10.00 ns/op   2.50 ns/word(4B)
+## Bend: tree-of-words Vec (gf256.bend), --threads 1  [ms per 10.24M words: ops*words]
+vec words=256 ops=40000 mode=0(0=xor,1=muladd mulw SWAR) ms=160
+vec words=256 ops=40000 mode=1(0=xor,1=muladd mulw SWAR) ms=230
+vec words=4 ops=2560000 mode=0(0=xor,1=muladd mulw SWAR) ms=172
+vec words=4 ops=2560000 mode=1(0=xor,1=muladd mulw SWAR) ms=325
+## Bend: tree-of-words Vec, --threads 2 / 12 (same binary, same single-threaded work)
+vec threads=2 words=256 ops=40000 mode=0 ms=349
+vec threads=2 words=256 ops=40000 mode=1 ms=421
+vec threads=12 words=256 ops=40000 mode=0 ms=350
+vec threads=12 words=256 ops=40000 mode=1 ms=421
+## Bend: mulw kernel variants inside the Vec walk (0 SWAR 1 unrolled SWAR 2 bit-sliced hoisted 3 log/exp 4 control xor-only) words=256 ops=40000
+mulw variant=0 ms=217
+mulw variant=1 ms=216
+mulw variant=2 ms=198
+mulw variant=3 ms=212
+mulw variant=4 ms=155
+## Bend: wider leaves (M words per leaf), kernels 0=G.mulw 2=bit-sliced hoisted; words=256 ops=40000
+leaf=4 kernel=0 mode=0(0=xor,1=muladd) ms=41
+leaf=4 kernel=0 mode=1(0=xor,1=muladd) ms=112
+leaf=4 kernel=2 mode=0(0=xor,1=muladd) ms=38
+leaf=4 kernel=2 mode=1(0=xor,1=muladd) ms=80
+leaf=16 kernel=0 mode=0(0=xor,1=muladd) ms=13
+leaf=16 kernel=0 mode=1(0=xor,1=muladd) ms=77
+leaf=16 kernel=2 mode=0(0=xor,1=muladd) ms=11
+leaf=16 kernel=2 mode=1(0=xor,1=muladd) ms=54
+## Bend: flat Array<U32> symbols  (0 xor, 1 muladd SWAR, 2 muladd bit-sliced, 3 muladd 64K table)
+arr words=4096 ops=2500 variant=0 ms=9
+arr words=4096 ops=2500 variant=1 ms=91
+arr words=4096 ops=2500 variant=2 ms=42
+arr words=4096 ops=2500 variant=3 ms=31
+arr words=256 ops=40000 variant=0 ms=9
+arr words=256 ops=40000 variant=1 ms=88
+arr words=256 ops=40000 variant=2 ms=43
+arr words=256 ops=40000 variant=3 ms=30
+arr words=4 ops=2560000 variant=0 ms=10
+arr words=4 ops=2560000 variant=1 ms=94
+arr words=4 ops=2560000 variant=2 ms=52
+arr words=4 ops=2560000 variant=3 ms=33
+## Bend: flat Array<U32>, --threads 2 / 12 (same single-threaded work)
+arr threads=2 words=256 ops=40000 variant=0 ms=11
+arr threads=2 words=256 ops=40000 variant=3 ms=29
+arr threads=12 words=256 ops=40000 variant=0 ms=10
+arr threads=12 words=256 ops=40000 variant=3 ms=30
+## dense Gauss-Jordan n x (n+T): C table / C neon / Bend flat arrays
+C GJ n=79 T=1024 table      3.66 ms  checksum 374056295  (276 words/row)
+C GJ n=79 T=1024 neon       0.78 ms  checksum 374056295  (276 words/row)
+gj_bend n=79 T=1024 ms=6
+C GJ n=142 T=1024 table      9.68 ms  checksum 999483201  (292 words/row)
+C GJ n=142 T=1024 neon       2.21 ms  checksum 999483201  (292 words/row)
+gj_bend n=142 T=1024 ms=20
+C GJ n=79 T=16 table      0.34 ms  checksum 1158751313  (24 words/row)
+C GJ n=79 T=16 neon       0.12 ms  checksum 1158751313  (24 words/row)
+gj_bend n=79 T=16 ms=0
+C GJ n=142 T=16 table      1.60 ms  checksum 1278648047  (40 words/row)
+C GJ n=142 T=16 neon       0.50 ms  checksum 1278648047  (40 words/row)
+gj_bend n=142 T=16 ms=3
+## repair generation, flat arrays (1000 symbols; ~7 terms each; T octets)
+repair_arr K=1000 T=1024 N=1000 ms=3
+repair_arr K=4000 T=1024 N=1000 ms=4
+repair_arr K=10000 T=1024 N=1000 ms=4
+repair_arr K=1000 T=16 N=1000 ms=0
+## cons-list proxy for sparse bookkeeping (map over N records, rounds)
+list_bend n=1000 rounds=10000 ms=72
+C list n=1000 rounds=10000 ms=175.10
+C list (arena) n=1000 rounds=10000 ms=37.38
+list_bend n=100000 rounds=100 ms=81
+C list n=100000 rounds=100 ms=182.43
+C list (arena) n=100000 rounds=100 ms=41.32
+## Array.get/set cost, 1M random ops (0 U32 get+set, 1 U32 get, 2 boxed get+set, 3 boxed get)
+arrops lg=8 mode=0 ms=1
+arrops lg=8 mode=1 ms=2
+arrops lg=8 mode=2 ms=21
+arrops lg=8 mode=3 ms=4
+arrops lg=16 mode=0 ms=1
+arrops lg=16 mode=1 ms=1
+arrops lg=16 mode=2 ms=29
+arrops lg=16 mode=3 ms=5
+arrops lg=20 mode=0 ms=4
+arrops lg=20 mode=1 ms=3
+arrops lg=20 mode=2 ms=72
+arrops lg=20 mode=3 ms=15

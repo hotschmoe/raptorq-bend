@@ -1,0 +1,1 @@
+C baselines are printed at the top of micro_results.txt (tools/profile/mb_c.c); numbers vary +-30% between runs because other jobs share the machine.
