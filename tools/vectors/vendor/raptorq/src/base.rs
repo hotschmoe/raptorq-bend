@@ -197,7 +197,7 @@ impl ObjectTransmissionInformation {
         self.symbol_alignment
     }
 
-    pub(crate) fn generate_encoding_parameters(
+    pub fn generate_encoding_parameters(
         transfer_length: u64,
         max_packet_size: u16,
         decoder_memory_requirement: u64,
