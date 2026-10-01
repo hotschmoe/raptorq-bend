@@ -285,7 +285,8 @@ def dg_find(t: DT, +c: U32, +nw: U32) -> Cand:
         case DG{+id, +piv, +co, rhs}:
           dg_cand(band(U32.is_eq(piv, 0), U32.is_ne(vget_oct(co, c, nw), 0)), DG{id, piv, co, rhs})
     case DTNode{l, r}:
-      cand_or(dg_find(l, c, nw), dg_find(r, c, nw))
+      a b = dg_find(l, c, nw) dg_find(r, c, nw)
+      cand_or(a, b)
 
 def dg_collect.go(z: Bool, piv: U32, rhs: G.Vec, acc: List<&2, Pr>) -> List<&2, Pr>:
   match z:
@@ -395,7 +396,8 @@ def st_build(+d: Nat, +w: U32, +lo: U32, +xs: List<&2, Pr>) -> ST:
         case _:
           +h = U32.shr(w)
           +mid = (lo + h : U32)
-          SN{st_build(p, h, lo, flt(xs, mid, True{}, Nil{})), st_build(p, (w - h : U32), mid, flt(xs, mid, False{}, Nil{}))}
+          l r = st_build(p, h, lo, flt(xs, mid, True{}, Nil{})) st_build(p, (w - h : U32), mid, flt(xs, mid, False{}, Nil{}))
+          SN{l, r}
 
 def st_pick(b: Bool, l: ST, r: ST) -> ST:
   match b:
@@ -499,7 +501,7 @@ def Solver.solve_dense(+l: U32, rows: List<&2, T.Row>) -> Maybe<&2, List<&2, G.V
   dense_fin(dg_run(0n, dt_build(32n, dg_rows(rows, zero_vec(nw), nw, 0, Nil{})), l, nw), l)
 
 # ===========================================================================
-# 5. Sparse term lists (sorted by column)
+# 5. Sparse term lists (sorted by column): normalisation
 # ===========================================================================
 
 def term_le(a: T.Term, b: T.Term) -> Bool:
@@ -516,69 +518,6 @@ def pick_l(b: Bool, x: List<&2, U32>, y: List<&2, U32>) -> List<&2, U32>:
       x
     case False{}:
       y
-
-# a * g (coefficient-wise)
-def tscale(ys: List<&2, T.Term>, +g: U32) -> List<&2, T.Term>:
-  match ys:
-    case Nil{}:
-      Nil{}
-    case h <> t:
-      match h:
-        case T.Term{c, f}:
-          T.Term{c, G.mul(g, f)} <> tscale(t, g)
-
-# state of a sorted merge: reversed output, remaining left, remaining right
-type Mg is Data:
-  Mg{acc: List<&2, T.Term>, xs: List<&2, T.Term>, ys: List<&2, T.Term>}
-
-def mg_zero(z: Bool, c: U32, s: U32, xt: List<&2, T.Term>, yt: List<&2, T.Term>, acc: List<&2, T.Term>) -> Mg:
-  match z:
-    case True{}:
-      Mg{acc, xt, yt}
-    case False{}:
-      Mg{T.Term{c, s} <> acc, xt, yt}
-
-def mg_step(k: Cmp, +g: U32, +xc: U32, +xf: U32, xt: List<&2, T.Term>, +yc: U32, +yf: U32, yt: List<&2, T.Term>, acc: List<&2, T.Term>) -> Mg:
-  match k:
-    case LT{}:
-      Mg{T.Term{xc, xf} <> acc, xt, T.Term{yc, yf} <> yt}
-    case GT{}:
-      Mg{T.Term{yc, G.mul(g, yf)} <> acc, T.Term{xc, xf} <> xt, yt}
-    case EQ{}:
-      +s = (xf .^. G.mul(g, yf) : U32)
-      mg_zero(U32.is_eq(s, 0), xc, s, xt, yt, acc)
-
-def mg_pair(+g: U32, x: T.Term, xt: List<&2, T.Term>, y: T.Term, yt: List<&2, T.Term>, acc: List<&2, T.Term>) -> Mg:
-  match x y:
-    case T.Term{+xc, xf} T.Term{+yc, yf}:
-      mg_step(U32.cmp(xc, yc), g, xc, xf, xt, yc, yf, yt, acc)
-
-def mg_go(f: Nat, +g: U32, st: Mg) -> List<&2, T.Term>:
-  match f:
-    case 0n:
-      match st:
-        case Mg{acc, xs, ys}:
-          List.reverse(&2, T.Term, acc)
-    case 1n+q:
-      match st:
-        case Mg{acc, xs, ys}:
-          match xs ys:
-            case Nil{} Nil{}:
-              List.reverse(&2, T.Term, acc)
-            case Nil{} y <> yt:
-              List.reverse.go(&2, T.Term, acc, tscale(y <> yt, g))
-            case x <> xt Nil{}:
-              List.reverse.go(&2, T.Term, acc, x <> xt)
-            case x <> xt y <> yt:
-              mg_go(q, g, mg_pair(g, x, xt, y, yt, acc))
-
-# a + g*b over GF(256): both sorted by column; result sorted, without zero coefficients
-def tmerge(+g: U32, +a: List<&2, T.Term>, +b: List<&2, T.Term>) -> List<&2, T.Term>:
-  match b:
-    case Nil{}:
-      a
-    case _:
-      mg_go(FUEL(), g, Mg{Nil{}, a, b})
 
 # ---- row normalisation: sort by column, XOR duplicate columns, drop zeros ------------------
 def tn_zero(z: Bool, c: U32, f: U32, acc: List<&2, T.Term>) -> List<&2, T.Term>:
@@ -1067,6 +1006,37 @@ def phase1(+l: U32, +p: U32, +nrows: U32, rows: List<&2, T.Row>, +nw: U32) -> P1
 #    from the logs: V_k = pack(own_k) + sum g * V_j, R_k = rhs_k + sum g * R_j (j earlier pivots).
 # ===========================================================================
 
+# Sequential twins of dg_find / st_build for the phase-2 path: their `l r = f g` forks cost a runtime round per tree
+# node when reached from sequential code (solve_dense, the oracle, keeps the original parallel versions untouched).
+def dg_find_s(t: DT, +c: U32, +nw: U32) -> Cand:
+  match t:
+    case DTNil{}:
+      CNone{}
+    case DTLeaf{r}:
+      match r:
+        case DG{+id, +piv, +co, rhs}:
+          dg_cand(band(U32.is_eq(piv, 0), U32.is_ne(vget_oct(co, c, nw), 0)), DG{id, piv, co, rhs})
+    case DTNode{l, r}:
+      cand_or(dg_find_s(l, c, nw), dg_find_s(r, c, nw))
+
+def dg_run_s(+par: Nat, +t: DT, +n: U32, +nw: U32) -> Maybe<&2, List<&2, Pr>>:
+  dg_loop(U32.to_nat(n), par, DP{t, dg_find_s(t, 0, nw)}, 0, n, nw)
+
+def st_build_s(+d: Nat, +w: U32, +lo: U32, +xs: List<&2, Pr>) -> ST:
+  match d:
+    case 0n:
+      SE{}
+    case 1n+p:
+      match w:
+        case 0:
+          SE{}
+        case 1:
+          st_leaf(xs)
+        case _:
+          +h = U32.shr(w)
+          +mid = (lo + h : U32)
+          SN{st_build_s(p, h, lo, flt(xs, mid, True{}, Nil{})), st_build_s(p, (w - h : U32), mid, flt(xs, mid, False{}, Nil{}))}
+
 def pivcols(pivs: List<&2, Pv>, acc: List<&2, U32>) -> List<&2, U32>:
   match pivs:
     case Nil{}:
@@ -1369,10 +1339,10 @@ def phase2_fin(res: Maybe<&2, List<&2, Pr>>, +n: U32, ci: List<&2, U32>, +l: U32
     case None{}:
       None{}
     case Some{ps}:
-      Some{finish(l, pivs, zip_ci(st_to_list(st_build(32n, n, 0, ps), Nil{}), ci, Nil{}))}
+      Some{finish(l, pivs, zip_ci(st_to_list(st_build_s(32n, n, 0, ps), Nil{}), ci, Nil{}))}
 
 def phase2.go3(+n: U32, +ci: List<&2, U32>, ts: List<&2, DT>, pivs: List<&2, Pv>, l: U32, +sw: U32, +nwd: U32) -> Maybe<&2, List<&2, G.Vec>>:
-  phase2_fin(dg_run(par_for(n, (sw + nwd : U32)), dt_build(32n, ts), n, nwd), n, ci, l, pivs)
+  phase2_fin(dg_run_s(par_for(n, (sw + nwd : U32)), dt_build(32n, ts), n, nwd), n, ci, l, pivs)
 
 def ds_fin(dm: DM) -> List<&2, DS>:
   match dm:
