@@ -15,7 +15,9 @@ Constraints (src/constraints.bend, agent D), per RFC 5.3.3.3 / 5.3.5.3 / 5.3.5.4
 - `Constraints.encode(sp, inter: List<Sym>, isi: U32) -> Sym`   evaluate LT/PI combination.
 
 Solver (src/solver.bend, agent E), RFC 5.4.2 (inactivation decoding / Gaussian elimination over GF(256)):
-- `Solver.solve(l: U32, rows: List<Row>) -> Maybe<List<Sym>>`   returns C[0..l-1] or None if rank-deficient. Must work for any consistent system (tested on synthetic GF(256) systems) — it need not follow the RFC's exact pivoting, since the intermediate symbols are unique when A has full rank. Start with a correct dense baseline, then add the RFC's sparse/inactivation optimization; keep the baseline as a test oracle.
+- `Solver.solve(l: U32, rows: List<&2, Row>) -> Maybe<&2, List<&2, Sym>>`   returns C[0..l-1] or None if rank < l. IMPLEMENTED (inactivation decoding, docs/solver.md). Lists are `&2` (Data) lists, i.e. exactly what `Constraints.*` return and what `Constraints.encode/index` take (a `&1` list does not type-check against either). Works for any consistent system; need not follow the RFC's exact pivoting. Rows may list columns in any order, repeat a column (coefficients XOR) or carry zero coefficients. An inconsistent overdetermined system is NOT detected (extra rows that reduce to `0 = nonzero` are ignored).
+- `Solver.solve_p(l: U32, p: U32, rows) -> Maybe<&2, List<&2, Sym>>`   same, with the hint that the last `p` columns are permanently inactive (RFC: p = L - W = `R.P(sp)`); `solve(l, rows) = solve_p(l, 0, rows)`. Pass the hint when you know it: it is faster and the answer is identical.
+- `Solver.solve_dense(l, rows)`   plain Gauss-Jordan oracle (same signature); `Solver.inactive_count(l, p, rows) -> U32` diagnostics (size of the dense tail).
 
 Encoder/decoder (wave 3): `Encoder`, `Decoder` composing the above.
 
