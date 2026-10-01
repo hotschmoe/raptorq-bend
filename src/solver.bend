@@ -279,8 +279,7 @@ def dg_find(t: DT, +c: U32, +nw: U32) -> Cand:
         case DG{+id, +piv, +co, rhs}:
           dg_cand(band(U32.is_eq(piv, 0), U32.is_ne(vget_oct(co, c, nw), 0)), DG{id, piv, co, rhs})
     case DTNode{l, r}:
-      a b = dg_find(l, c, nw) dg_find(r, c, nw)
-      cand_or(a, b)
+      cand_or(dg_find(l, c, nw), dg_find(r, c, nw))
 
 def dg_collect.go(z: Bool, piv: U32, rhs: G.Vec, acc: List<&2, Pr>) -> List<&2, Pr>:
   match z:
@@ -390,8 +389,7 @@ def st_build(+d: Nat, +w: U32, +lo: U32, +xs: List<&2, Pr>) -> ST:
         case _:
           +h = U32.shr(w)
           +mid = (lo + h : U32)
-          l r = st_build(p, h, lo, flt(xs, mid, True{}, Nil{})) st_build(p, (w - h : U32), mid, flt(xs, mid, False{}, Nil{}))
-          SN{l, r}
+          SN{st_build(p, h, lo, flt(xs, mid, True{}, Nil{})), st_build(p, (w - h : U32), mid, flt(xs, mid, False{}, Nil{}))}
 
 def st_pick(b: Bool, l: ST, r: ST) -> ST:
   match b:
@@ -632,29 +630,41 @@ def ts_flt(ts: List<&2, T.Term>, +lim: U32, +lowside: Bool, acc: List<&2, T.Term
 # ===========================================================================
 # 6. Phase 1: sparse elimination with inactivation, driven by a column -> rows index
 # ===========================================================================
-# Sp = sparse row: act = terms in ACTIVE columns, ina = terms in INACTIVE columns (both sorted), w = |act|,
-#      oc/r0 = the normalised ORIGINAL terms and rhs (kept for the phase-3 forward substitution).
-# Dn = dense row: coefficient Vec over all l columns (HDPC-like rows); never chosen as a pivot.
+# Phase 1 only decides WHICH rows pivot on WHICH columns and which columns are inactivated; it works on the
+# small "active" parts of the rows and never touches symbols or inactive coefficients.  Every row instead
+# records a log of the eliminations it received (g, j): "row += g * pivot row number j".  The inactive
+# coefficient vectors and the symbols are computed from these logs afterwards (section 7, `mat_*`).
+#
+# Sp = sparse row: act = terms in ACTIVE columns (sorted, w = |act|), own = terms the row itself has in
+#      INACTIVE columns (permanent ones + terms moved from act when their column was inactivated), log =
+#      eliminations received, oc/r0 = the normalised ORIGINAL terms and rhs (phase-3 forward substitution).
+# Dn = dense row: coefficient Vec over all l columns (HDPC-like rows); never a pivot, corrected at the end.
+type Lg is Data:
+  Lg{g: U32, j: U32}
+
 type Rw is Data:
-  Sp{id: U32, w: U32, act: List<&2, T.Term>, ina: List<&2, T.Term>, rhs: G.Vec, oc: List<&2, T.Term>, r0: G.Vec}
+  Sp{id: U32, w: U32, act: List<&2, T.Term>, own: List<&2, T.Term>, log: List<&2, Lg>, oc: List<&2, T.Term>, r0: G.Vec}
   Dn{id: U32, co: G.Vec, rhs: G.Vec}
 
 # One elimination step: pivot column pc (coefficient pcf in the pivot row), columns s are inactivated,
-# pina/prhs = the pivot row's inactive part and rhs, pid = pivot row id (removed from the table).
+# j = number of the pivot.
 type Stp is Data:
-  Stp{pc: U32, pcf: U32, s: List<&2, U32>, pina: List<&2, T.Term>, prhs: G.Vec, pid: U32}
+  Stp{pc: U32, pcf: U32, s: List<&2, U32>, j: U32}
 
-# A finished pivot: column, and the original equation (terms over earlier pivot columns, inactive columns and pc),
-# plus the frozen pivot row (coefficient of pc, inactive terms, rhs) that the dense rows are corrected with.
+# A finished pivot (in selection order): column, frozen coefficient of pc, the row's own inactive terms
+# (including the terms moved at its own step), its elimination log, and its original equation.
 type Pv is Data:
-  Pv{pc: U32, pcf: U32, oc: List<&2, T.Term>, r0: G.Vec, pina: List<&2, T.Term>, prhs: G.Vec}
+  Pv{pc: U32, pcf: U32, own: List<&2, T.Term>, log: List<&2, Lg>, oc: List<&2, T.Term>, r0: G.Vec}
+
+type Pl is Data:
+  Pl{n: U32, l: List<&2, Pv>}
 
 def dummy() -> Rw:
-  Sp{4294967295, 0, Nil{}, Nil{}, G.VNil{}, Nil{}, G.VNil{}}
+  Sp{4294967295, 0, Nil{}, Nil{}, Nil{}, Nil{}, G.VNil{}}
 
 def rw_id(r: Rw) -> U32:
   match r:
-    case Sp{id, w, act, ina, rhs, oc, r0}:
+    case Sp{id, w, act, own, log, oc, r0}:
       id
     case Dn{id, co, rhs}:
       id
@@ -665,7 +675,7 @@ def is_live(r: Rw) -> Bool:
 # active weight of a sparse row (0 for dense rows)
 def rw_w(r: Rw) -> U32:
   match r:
-    case Sp{id, w, act, ina, rhs, oc, r0}:
+    case Sp{id, w, act, own, log, oc, r0}:
       w
     case Dn{id, co, rhs}:
       0
@@ -732,58 +742,35 @@ def sc_go(act: List<&2, T.Term>, +pc: U32, +s: List<&2, U32>, st: Sc) -> Sc:
           sc_go(t, pc, s, sc_step(sc_class(c, pc, s), c, x, st))
 
 # ---- eliminate the pivot step from one sparse row -------------------------------------------
-def elim_sp.fin2(+g: U32, id: U32, w: U32, rest: List<&2, T.Term>, ina: List<&2, T.Term>, rhs: G.Vec, oc: List<&2, T.Term>, r0: G.Vec, pina: List<&2, T.Term>, prhs: G.Vec) -> Rw:
+def elim_sp.fin2(+g: U32, +j: U32, id: U32, w: U32, rest: List<&2, T.Term>, own: List<&2, T.Term>, log: List<&2, Lg>, oc: List<&2, T.Term>, r0: G.Vec) -> Rw:
   match g:
     case 0:
-      Sp{id, w, rest, ina, rhs, oc, r0}
+      Sp{id, w, rest, own, log, oc, r0}
     case _:
-      Sp{id, w, rest, tmerge(g, ina, pina), sv_muladd(g, rhs, prhs), oc, r0}
+      Sp{id, w, rest, own, Lg{g, j} <> log, oc, r0}
 
-def elim_sp.fin(sc: Sc, id: U32, ina: List<&2, T.Term>, rhs: G.Vec, oc: List<&2, T.Term>, r0: G.Vec, +pcf: U32, pina: List<&2, T.Term>, prhs: G.Vec) -> Rw:
+def elim_sp.fin(sc: Sc, id: U32, own: List<&2, T.Term>, log: List<&2, Lg>, oc: List<&2, T.Term>, r0: G.Vec, +pcf: U32, +j: U32) -> Rw:
   match sc:
     case Sc{f, w, rest, moved}:
-      elim_sp.fin2(G.div(f, pcf), id, w, rest, tmerge(1, ina, moved), rhs, oc, r0, pina, prhs)
+      elim_sp.fin2(G.div(f, pcf), j, id, w, rest, tmerge(1, own, moved), log, oc, r0)
 
-def elim_sp.go(h: Bool, id: U32, w: U32, act: List<&2, T.Term>, ina: List<&2, T.Term>, rhs: G.Vec, oc: List<&2, T.Term>, r0: G.Vec, st: Stp) -> Rw:
+def elim_sp.go(h: Bool, id: U32, w: U32, act: List<&2, T.Term>, own: List<&2, T.Term>, log: List<&2, Lg>, oc: List<&2, T.Term>, r0: G.Vec, st: Stp) -> Rw:
   match h:
     case False{}:
-      Sp{id, w, act, ina, rhs, oc, r0}
+      Sp{id, w, act, own, log, oc, r0}
     case True{}:
       match st:
-        case Stp{pc, pcf, s, pina, prhs, pid}:
-          elim_sp.fin(sc_go(act, pc, s, Sc{0, 0, Nil{}, Nil{}}), id, ina, rhs, oc, r0, pcf, pina, prhs)
+        case Stp{pc, pcf, s, j}:
+          elim_sp.fin(sc_go(act, pc, s, Sc{0, 0, Nil{}, Nil{}}), id, own, log, oc, r0, pcf, j)
 
-# ---- eliminate from one dense row ----------------------------------------------------------
-def apply_terms(ts: List<&2, T.Term>, co: G.Vec, +g: U32, +nw: U32) -> G.Vec:
-  match ts:
-    case Nil{}:
-      co
-    case h <> t:
-      match h:
-        case T.Term{c, f}:
-          apply_terms(t, vxor_oct(co, c, nw, G.mul(g, f)), g, nw)
-
-def elim_dn.go(+g: U32, +f: U32, id: U32, co: G.Vec, rhs: G.Vec, +pc: U32, +nw: U32, pina: List<&2, T.Term>, prhs: G.Vec) -> Rw:
-  match g:
-    case 0:
-      Dn{id, co, rhs}
-    case _:
-      Dn{id, apply_terms(pina, vxor_oct(co, pc, nw, f), g, nw), sv_muladd(g, rhs, prhs)}
-
-def elim_dn(id: U32, +co: G.Vec, rhs: G.Vec, st: Stp, +nw: U32) -> Rw:
-  match st:
-    case Stp{+pc, +pcf, s, pina, prhs, pid}:
-      +f = vget_oct(co, pc, nw)
-      elim_dn.go(G.div(f, pcf), f, id, co, rhs, pc, nw, pina, prhs)
-
-def elim(r: Rw, st: Stp, nw: U32) -> Rw:
+def elim(r: Rw, st: Stp) -> Rw:
   match r:
-    case Sp{id, w, +act, ina, rhs, oc, r0}:
+    case Sp{id, w, +act, own, log, oc, r0}:
       match st:
-        case Stp{+pc, pcf, +s, pina, prhs, pid}:
-          elim_sp.go(hit(act, pc, s), id, w, act, ina, rhs, oc, r0, Stp{pc, pcf, s, pina, prhs, pid})
+        case Stp{+pc, pcf, +s, j}:
+          elim_sp.go(hit(act, pc, s), id, w, act, own, log, oc, r0, Stp{pc, pcf, s, j})
     case Dn{id, co, rhs}:
-      elim_dn(id, co, rhs, st, nw)
+      Dn{id, co, rhs}
 
 # ---- the state of phase 1 --------------------------------------------------------------------
 # rows : Array<Rw> by row id (dummy where a row is dense, a pivot or being worked on)
@@ -791,7 +778,7 @@ def elim(r: Rw, st: Stp, nw: U32) -> Rw:
 # bk   : bucket by weight: row ids that had this weight when pushed (stale entries are skipped: wt != w)
 # ci   : column -> ids of rows that have the column in their active part (only ever shrinks)
 type P1 is Type:
-  P1{rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: List<&2, Pv>, done: U32}
+  P1{rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: Pl, done: U32}
 
 type CS is Type:
   CS{rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>}
@@ -836,98 +823,92 @@ def gather(cs: List<&2, U32>, r: Array<List<&2, U32>> & List<&2, U32>, acc: List
     case +c <> t Tuple{ci, l}:
       gather(t, Array.swap(List<&2, U32>, ci, c, Nil{}), List.append(&2, U32, l, acc))
 
-# ---- eliminate the step from every candidate row (sequential: the work per step is a handful of rows) ----
+# ---- eliminate the step from every candidate row (sequential: a handful of small rows per step) ----
 def cand_three(+id: U32, +r2: Rw, rows: Array<Rw>, rw: Array<U32> & U32, bk: Array<List<&2, U32>>) -> CS:
   match rw:
     case Tuple{wt, old}:
       +w2 = rw_w(r2)
       CS{Array.set(Rw, rows, id, r2), Array.set(U32, wt, id, w2), bk_push_if(band(U32.is_ne(w2, old), U32.is_ne(w2, 0)), bk, w2, id)}
 
-def cand_two(live: Bool, +id: U32, +st: Stp, +nw: U32, rows: Array<Rw>, row: Rw, wt: Array<U32>, bk: Array<List<&2, U32>>) -> CS:
+def cand_two(live: Bool, +id: U32, +st: Stp, rows: Array<Rw>, row: Rw, wt: Array<U32>, bk: Array<List<&2, U32>>) -> CS:
   match live:
     case False{}:
       CS{rows, wt, bk}
     case True{}:
-      cand_three(id, elim(row, st, nw), rows, Array.get(U32, wt, id), bk)
+      cand_three(id, elim(row, st), rows, Array.get(U32, wt, id), bk)
 
-def cand_one(+id: U32, +st: Stp, +nw: U32, r: Array<Rw> & Rw, wt: Array<U32>, bk: Array<List<&2, U32>>) -> CS:
+def cand_one(+id: U32, +st: Stp, r: Array<Rw> & Rw, wt: Array<U32>, bk: Array<List<&2, U32>>) -> CS:
   match r:
     case Tuple{rows, +row}:
-      cand_two(is_live(row), id, st, nw, rows, row, wt, bk)
+      cand_two(is_live(row), id, st, rows, row, wt, bk)
 
-def cand_loop(ids: List<&2, U32>, +st: Stp, +nw: U32, cs: CS) -> CS:
+def cand_loop(ids: List<&2, U32>, +st: Stp, cs: CS) -> CS:
   match ids:
     case Nil{}:
       cs
     case +id <> rest:
       match cs:
         case CS{rows, wt, bk}:
-          cand_loop(rest, st, nw, cand_one(id, st, nw, Array.swap(Rw, rows, id, dummy()), wt, bk))
-
-def dn_loop(ds: List<&2, Rw>, +st: Stp, +nw: U32) -> List<&2, Rw>:
-  match ds:
-    case Nil{}:
-      Nil{}
-    case r <> rest:
-      elim(r, st, nw) <> dn_loop(rest, st, nw)
+          cand_loop(rest, st, cand_one(id, st, Array.swap(Rw, rows, id, dummy()), wt, bk))
 
 # ---- one pivot step ---------------------------------------------------------------------------
-def st8(cs: CS, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: List<&2, Pv>) -> P1:
+def st8(cs: CS, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: Pl) -> P1:
   match cs:
     case CS{rows, wt, bk}:
       P1{rows, wt, bk, ci, dn, pivs, 0}
 
-def st7(+nw: U32, +stp: Stp, pv: Pv, rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: List<&2, Pv>, gi: GI) -> P1:
+def st7(+stp: Stp, pv: Pv, n: U32, l: List<&2, Pv>, rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, dn: List<&2, Rw>, gi: GI) -> P1:
   match gi:
     case GI{ci, ids}:
-      st8(cand_loop(ids, stp, nw, CS{rows, wt, bk}), ci, dn, pv <> pivs)
+      st8(cand_loop(ids, stp, CS{rows, wt, bk}), ci, dn, Pl{(n + 1 : U32), pv <> l})
 
-def st6(+nw: U32, +id: U32, +pc: U32, +pcf: U32, +rest: List<&2, T.Term>, ina: List<&2, T.Term>, +rhs: G.Vec, oc: List<&2, T.Term>, r0: G.Vec, rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: List<&2, Pv>) -> P1:
-  +s = cols_of(rest)
-  +pina = tmerge(1, ina, rest)
-  st7(nw, Stp{pc, pcf, s, pina, rhs, id}, Pv{pc, pcf, oc, r0, pina, rhs}, rows, wt, bk, dn, pivs, gather(s, Array.swap(List<&2, U32>, ci, pc, Nil{}), Nil{}))
+def st6(+id: U32, +pc: U32, +pcf: U32, +rest: List<&2, T.Term>, own: List<&2, T.Term>, log: List<&2, Lg>, oc: List<&2, T.Term>, r0: G.Vec, rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: Pl) -> P1:
+  match pivs:
+    case Pl{+n, l}:
+      +s = cols_of(rest)
+      st7(Stp{pc, pcf, s, n}, Pv{pc, pcf, tmerge(1, own, rest), log, oc, r0}, n, l, rows, wt, bk, dn, gather(s, Array.swap(List<&2, U32>, ci, pc, Nil{}), Nil{}))
 
-def st5b(+nw: U32, +id: U32, h: T.Term, rest: List<&2, T.Term>, ina: List<&2, T.Term>, rhs: G.Vec, oc: List<&2, T.Term>, r0: G.Vec, rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: List<&2, Pv>) -> P1:
+def st5b(+id: U32, h: T.Term, rest: List<&2, T.Term>, own: List<&2, T.Term>, log: List<&2, Lg>, oc: List<&2, T.Term>, r0: G.Vec, rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: Pl) -> P1:
   match h:
     case T.Term{pc, pcf}:
-      st6(nw, id, pc, pcf, rest, ina, rhs, oc, r0, rows, wt, bk, ci, dn, pivs)
+      st6(id, pc, pcf, rest, own, log, oc, r0, rows, wt, bk, ci, dn, pivs)
 
-def st5a(+nw: U32, +id: U32, act: List<&2, T.Term>, ina: List<&2, T.Term>, rhs: G.Vec, oc: List<&2, T.Term>, r0: G.Vec, rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: List<&2, Pv>) -> P1:
+def st5a(+id: U32, act: List<&2, T.Term>, own: List<&2, T.Term>, log: List<&2, Lg>, oc: List<&2, T.Term>, r0: G.Vec, rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: Pl) -> P1:
   match act:
     case Nil{}:
       P1{rows, wt, bk, ci, dn, pivs, 1}
     case h <> rest:
-      st5b(nw, id, h, rest, ina, rhs, oc, r0, rows, wt, bk, ci, dn, pivs)
+      st5b(id, h, rest, own, log, oc, r0, rows, wt, bk, ci, dn, pivs)
 
-def st5(+nw: U32, +id: U32, r: Array<Rw> & Rw, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: List<&2, Pv>) -> P1:
+def st5(+id: U32, r: Array<Rw> & Rw, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: Pl) -> P1:
   match r:
     case Tuple{rows, row}:
       match row:
-        case Sp{rid, w, act, ina, rhs, oc, r0}:
-          st5a(nw, id, act, ina, rhs, oc, r0, rows, wt, bk, ci, dn, pivs)
+        case Sp{rid, w, act, own, log, oc, r0}:
+          st5a(id, act, own, log, oc, r0, rows, wt, bk, ci, dn, pivs)
         case Dn{rid, co, rhs}:
           P1{rows, wt, bk, ci, dn, pivs, 1}
 
-def st4(valid: Bool, +nw: U32, rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: List<&2, Pv>, +id: U32) -> P1:
+def st4(valid: Bool, rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: Pl, +id: U32) -> P1:
   match valid:
     case False{}:
       P1{rows, wt, bk, ci, dn, pivs, 0}
     case True{}:
-      st5(nw, id, Array.swap(Rw, rows, id, dummy()), Array.set(U32, wt, id, 0), bk, ci, dn, pivs)
+      st5(id, Array.swap(Rw, rows, id, dummy()), Array.set(U32, wt, id, 0), bk, ci, dn, pivs)
 
-def st3(+nw: U32, rows: Array<Rw>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: List<&2, Pv>, +w: U32, +id: U32, bk: Array<List<&2, U32>>, r: Array<U32> & U32) -> P1:
+def st3(rows: Array<Rw>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: Pl, +w: U32, +id: U32, bk: Array<List<&2, U32>>, r: Array<U32> & U32) -> P1:
   match r:
     case Tuple{wt, cw}:
-      st4(U32.is_eq(cw, w), nw, rows, wt, bk, ci, dn, pivs, id)
+      st4(U32.is_eq(cw, w), rows, wt, bk, ci, dn, pivs, id)
 
-def st2(+nw: U32, rows: Array<Rw>, wt: Array<U32>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: List<&2, Pv>, +w: U32, r: Array<List<&2, U32>> & List<&2, U32>) -> P1:
+def st2(rows: Array<Rw>, wt: Array<U32>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: Pl, +w: U32, r: Array<List<&2, U32>> & List<&2, U32>) -> P1:
   match r:
     case Tuple{bk, lst}:
       match lst:
         case Nil{}:
           P1{rows, wt, bk, ci, dn, pivs, 1}
         case +id <> rest:
-          st3(nw, rows, ci, dn, pivs, w, id, Array.set(List<&2, U32>, bk, w, rest), Array.get(U32, wt, id))
+          st3(rows, ci, dn, pivs, w, id, Array.set(List<&2, U32>, bk, w, rest), Array.get(U32, wt, id))
 
 # lowest non-empty bucket >= w (r = the bucket w as returned by Array.get)
 def pk_scan(f: Nat, +w: U32, r: Array<List<&2, U32>> & List<&2, U32>) -> SC:
@@ -941,27 +922,27 @@ def pk_scan(f: Nat, +w: U32, r: Array<List<&2, U32>> & List<&2, U32>) -> SC:
         case _ <> _:
           SC{bk, w, 1}
 
-def st1(+nw: U32, rows: Array<Rw>, wt: Array<U32>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: List<&2, Pv>, sc: SC) -> P1:
+def st1(rows: Array<Rw>, wt: Array<U32>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: Pl, sc: SC) -> P1:
   match sc:
     case SC{bk, +w, ok}:
       match ok:
         case 0:
           P1{rows, wt, bk, ci, dn, pivs, 1}
         case _:
-          st2(nw, rows, wt, ci, dn, pivs, w, Array.swap(List<&2, U32>, bk, w, Nil{}))
+          st2(rows, wt, ci, dn, pivs, w, Array.swap(List<&2, U32>, bk, w, Nil{}))
 
 # one iteration: pop one entry of the lowest bucket; a stale entry is dropped, a valid one is a pivot step
-def p1_step(+nw: U32, rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: List<&2, Pv>) -> P1:
-  st1(nw, rows, wt, ci, dn, pivs, pk_scan(63n, 1, Array.get(List<&2, U32>, bk, 1)))
+def p1_step(rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: Pl) -> P1:
+  st1(rows, wt, ci, dn, pivs, pk_scan(63n, 1, Array.get(List<&2, U32>, bk, 1)))
 
-def p1_loop(k: Nat, +nw: U32, st: P1) -> P1:
+def p1_loop(k: Nat, st: P1) -> P1:
   match k st:
     case 0n _:
       st
     case 1n+q P1{rows, wt, bk, ci, dn, pivs, done}:
       match done:
         case 0:
-          p1_loop(q, nw, p1_step(nw, rows, wt, bk, ci, dn, pivs))
+          p1_loop(q, p1_step(rows, wt, bk, ci, dn, pivs))
         case _:
           P1{rows, wt, bk, ci, dn, pivs, 1}
 
@@ -985,11 +966,11 @@ def ci_add(ts: List<&2, T.Term>, +id: U32, ci: Array<List<&2, U32>>) -> Array<Li
         case T.Term{c, f}:
           ci_add(t, id, arr_push(ci, c, id))
 
-def init_sparse(+id: U32, +act: List<&2, T.Term>, ina: List<&2, T.Term>, +rhs: G.Vec, oc: List<&2, T.Term>, st: IN) -> IN:
+def init_sparse(+id: U32, +act: List<&2, T.Term>, own: List<&2, T.Term>, +rhs: G.Vec, oc: List<&2, T.Term>, st: IN) -> IN:
   match st:
     case IN{rows, wt, bk, ci, dn}:
       +w = U32.from_nat(List.length(&2, T.Term, act))
-      IN{Array.set(Rw, rows, id, Sp{id, w, act, ina, rhs, oc, rhs}), Array.set(U32, wt, id, w), bk_push_if(U32.is_ne(w, 0), bk, w, id), ci_add(act, id, ci), dn}
+      IN{Array.set(Rw, rows, id, Sp{id, w, act, own, Nil{}, oc, rhs}), Array.set(U32, wt, id, w), bk_push_if(U32.is_ne(w, 0), bk, w, id), ci_add(act, id, ci), dn}
 
 def init_dense(id: U32, co: G.Vec, rhs: G.Vec, st: IN) -> IN:
   match st:
@@ -1035,13 +1016,15 @@ def in_new(+nrows: U32, l: U32) -> IN:
 def p1_of(st: IN) -> P1:
   match st:
     case IN{rows, wt, bk, ci, dn}:
-      P1{rows, wt, bk, ci, dn, Nil{}, 0}
+      P1{rows, wt, bk, ci, dn, Pl{0, Nil{}}, 0}
 
 def phase1(+l: U32, +p: U32, +nrows: U32, rows: List<&2, T.Row>, +nw: U32) -> P1:
-  p1_loop(FUEL(), nw, p1_of(init_go(rows, l, p, zero_vec(nw), nw, 0, in_new(nrows, l))))
+  p1_loop(FUEL(), p1_of(init_go(rows, l, p, zero_vec(nw), nw, 0, in_new(nrows, l))))
 
 # ===========================================================================
 # 7. Phase 2: dense solve over the inactive columns Ci = all columns that are not pivots
+#    The inactive coefficients and the symbols of pivot rows / leftover rows / dense rows are materialised
+#    from the logs: V_k = pack(own_k) + sum g * V_j, R_k = rhs_k + sum g * R_j (j earlier pivots).
 # ===========================================================================
 
 def pivcols(pivs: List<&2, Pv>, acc: List<&2, U32>) -> List<&2, U32>:
@@ -1050,7 +1033,7 @@ def pivcols(pivs: List<&2, Pv>, acc: List<&2, U32>) -> List<&2, U32>:
       acc
     case h <> t:
       match h:
-        case Pv{pc, pcf, oc, r0, pina, prhs}:
+        case Pv{pc, pcf, own, log, oc, r0}:
           pivcols(t, pc <> acc)
 
 # complement of the sorted pivot columns in 0..l-1 (fuel = l)
@@ -1066,44 +1049,6 @@ def compl(f: Nat, +c: U32, pcs: List<&2, U32>, +acc: List<&2, U32>) -> List<&2, 
           +isp = U32.is_eq(h, c)
           compl(q, (c + 1 : U32), pick_l(isp, t, h <> t), pick_l(isp, acc, c <> acc))
 
-# sparse row (sorted terms over inactive columns) -> dense coefficient Vec over Ci positions
-type Wk is Data:
-  Wk{co: G.Vec, ts: List<&2, T.Term>, ci: List<&2, U32>, pos: U32}
-
-def wk_step(k: Cmp, co: G.Vec, +hc: U32, +hf: U32, tt: List<&2, T.Term>, +c: U32, ct: List<&2, U32>, +pos: U32, +nw: U32) -> Wk:
-  match k:
-    case EQ{}:
-      Wk{vxor_oct(co, pos, nw, hf), tt, ct, (pos + 1 : U32)}
-    case LT{}:
-      Wk{co, T.Term{hc, hf} <> tt, ct, (pos + 1 : U32)}
-    case GT{}:
-      Wk{co, tt, c <> ct, pos}
-
-def wk_pair(co: G.Vec, h: T.Term, tt: List<&2, T.Term>, +c: U32, ct: List<&2, U32>, pos: U32, nw: U32) -> Wk:
-  match h:
-    case T.Term{+hc, hf}:
-      wk_step(U32.cmp(c, hc), co, hc, hf, tt, c, ct, pos, nw)
-
-def wk_go(f: Nat, st: Wk, +nw: U32) -> G.Vec:
-  match f:
-    case 0n:
-      match st:
-        case Wk{co, ts, ci, pos}:
-          co
-    case 1n+q:
-      match st:
-        case Wk{co, ts, ci, pos}:
-          match ts ci:
-            case Nil{} _:
-              co
-            case _ Nil{}:
-              co
-            case h <> tt c <> ct:
-              wk_go(q, wk_pair(co, h, tt, c, ct, pos, nw), nw)
-
-def sp_dense(+ts: List<&2, T.Term>, +ci: List<&2, U32>, zero: G.Vec, nw: U32) -> G.Vec:
-  wk_go(List.length(&2, U32, List.append(&2, U32, ci, List.append(&2, U32, cols_of(ts), Nil{}))), Wk{zero, ts, ci, 0}, nw)
-
 # dense row over all columns -> its entries at the columns Ci
 def dn_dense(ci: List<&2, U32>, +pos: U32, +src: G.Vec, +nws: U32, dst: G.Vec, +nwd: U32) -> G.Vec:
   match ci:
@@ -1112,22 +1057,7 @@ def dn_dense(ci: List<&2, U32>, +pos: U32, +src: G.Vec, +nws: U32, dst: G.Vec, +
     case c <> ct:
       dn_dense(ct, (pos + 1 : U32), src, nws, vxor_oct(dst, pos, nwd, vget_oct(src, c, nws)), nwd)
 
-def rw_dg(r: Rw, +id: U32, +ci: List<&2, U32>, +zero: G.Vec, +nws: U32, +nwd: U32) -> DG:
-  match r:
-    case Sp{rid, w, act, ina, rhs, oc, r0}:
-      DG{id, 0, sp_dense(ina, ci, zero, nwd), rhs}
-    case Dn{rid, co, rhs}:
-      DG{id, 0, zero, rhs}
-
-# ---- the dense rows are corrected for all pivots at the end (not inside the phase-1 loop) ----------------
-# A dense row's coefficient at a later pivot column is never changed by earlier pivots (pivot rows only
-# contain their own pivot column among pivot columns), so for pivot k: g = orig[pc_k] / pcf_k and
-# row -= g * (frozen pivot row k).  The frozen row's inactive part is expanded ONCE per pivot into a packed
-# vector over the positions of Ci and applied to every dense row with word operations.
-type DS is Data:
-  DS{id: U32, co: G.Vec, acc: G.Vec, rhs: G.Vec}
-
-# packed coefficients over Ci positions from sorted terms (all columns in Ci): 4 octets per word, lane k
+# ---- packed coefficients over Ci positions from sorted terms (all columns in Ci): 4 octets per word, lane k ----
 type Pw is Data:
   Pw{ws: List<&2, U32>, cur: U32, k: U32, ts: List<&2, T.Term>}
 
@@ -1181,7 +1111,83 @@ def pw_flush(st: Pw) -> G.Vec:
 def pk_terms(ts: List<&2, T.Term>, ci: List<&2, U32>) -> G.Vec:
   pw_flush(pw_go(ci, Pw{Nil{}, 0, 0, ts}))
 
-def ds_map(ds: List<&2, DS>, +pc: U32, +pcf: U32, +prhs: G.Vec, +v: G.Vec, +nw: U32) -> List<&2, DS>:
+# ---- materialise a row from its log: VR{coefficients over Ci, symbol} ---------------------------------
+type VR is Data:
+  VR{v: G.Vec, r: G.Vec}
+
+type Mt is Type:
+  Mt{ar: Array<VR>, acc: VR}
+
+def vr_add(+g: U32, acc: VR, x: VR) -> VR:
+  match acc:
+    case VR{v, r}:
+      match x:
+        case VR{xv, xr}:
+          VR{sv_muladd(g, v, xv), sv_muladd(g, r, xr)}
+
+# g, r = the current log entry and its pivot's VR (already fetched); lg = the entries after it
+def mat_go(lg: List<&2, Lg>, +g: U32, r: Array<VR> & VR, acc: VR) -> Mt:
+  match lg r:
+    case Nil{} Tuple{ar, x}:
+      Mt{ar, vr_add(g, acc, x)}
+    case Lg{+g2, j2} <> t Tuple{ar, x}:
+      mat_go(t, g2, Array.get(VR, ar, j2), vr_add(g, acc, x))
+
+def mat_start(lg: List<&2, Lg>, ar: Array<VR>, acc: VR) -> Mt:
+  match lg:
+    case Nil{}:
+      Mt{ar, acc}
+    case h <> t:
+      match h:
+        case Lg{+g, j}:
+          mat_go(t, g, Array.get(VR, ar, j), acc)
+
+def mat_set(+k: U32, m: Mt) -> Array<VR>:
+  match m:
+    case Mt{ar, acc}:
+      Array.set(VR, ar, k, acc)
+
+# all pivots, oldest first (pvs), k = pivot number
+def mat_pivs(pvs: List<&2, Pv>, +k: U32, +ci: List<&2, U32>, ar: Array<VR>) -> Array<VR>:
+  match pvs:
+    case Nil{}:
+      ar
+    case h <> t:
+      match h:
+        case Pv{pc, pcf, own, log, oc, r0}:
+          mat_pivs(t, (k + 1 : U32), ci, mat_set(k, mat_start(log, ar, VR{pk_terms(own, ci), r0})))
+
+# ---- leftover sparse rows -> dense rows of the Ci system -----------------------------------------------
+type LR is Type:
+  LR{ar: Array<VR>, out: List<&2, DT>}
+
+def lr_fin(+id: U32, m: Mt, out: List<&2, DT>) -> LR:
+  match m:
+    case Mt{ar, acc}:
+      match acc:
+        case VR{v, r}:
+          LR{ar, DTLeaf{DG{id, 0, v, r}} <> out}
+
+def lr_loop(rs: List<&2, Rw>, +ci: List<&2, U32>, +id: U32, st: LR) -> LR:
+  match rs st:
+    case Nil{} _:
+      st
+    case Sp{rid, w, act, own, log, oc, r0} <> t LR{ar, out}:
+      lr_loop(t, ci, (id + 1 : U32), lr_fin(id, mat_start(log, ar, VR{pk_terms(own, ci), r0}), out))
+    case Dn{rid, co, rhs} <> t LR{ar, out}:
+      lr_loop(t, ci, id, LR{ar, out})
+
+# ---- the dense rows are corrected for all pivots at the end (not inside the phase-1 loop) ----------------
+# A dense row's coefficient at a later pivot column is never changed by earlier pivots (pivot rows only
+# contain their own pivot column among pivot columns), so for pivot k: g = orig[pc_k] / pcf_k and
+# row -= g * (pivot row k as materialised).
+type DS is Data:
+  DS{id: U32, co: G.Vec, acc: G.Vec, rhs: G.Vec}
+
+type DM is Type:
+  DM{ar: Array<VR>, ds: List<&2, DS>}
+
+def ds_map(ds: List<&2, DS>, +pc: U32, +pcf: U32, +v: G.Vec, +r: G.Vec, +nw: U32) -> List<&2, DS>:
   match ds:
     case Nil{}:
       Nil{}
@@ -1189,21 +1195,19 @@ def ds_map(ds: List<&2, DS>, +pc: U32, +pcf: U32, +prhs: G.Vec, +v: G.Vec, +nw: 
       match d:
         case DS{id, +co, acc, rhs}:
           +g = G.div(vget_oct(co, pc, nw), pcf)
-          DS{id, co, sv_muladd(g, acc, v), sv_muladd(g, rhs, prhs)} <> ds_map(t, pc, pcf, prhs, v, nw)
+          DS{id, co, sv_muladd(g, acc, v), sv_muladd(g, rhs, r)} <> ds_map(t, pc, pcf, v, r, nw)
 
-def ds_one(pv: Pv, +ci: List<&2, U32>, +nw: U32, ds: List<&2, DS>) -> List<&2, DS>:
-  match pv:
-    case Pv{+pc, +pcf, oc, r0, pina, +prhs}:
-      ds_map(ds, pc, pcf, prhs, pk_terms(pina, ci), nw)
+def ds_one(pv: Pv, +nw: U32, ds: List<&2, DS>, r: Array<VR> & VR) -> DM:
+  match pv r:
+    case Pv{pc, pcf, own, log, oc, r0} Tuple{ar, VR{v, rr}}:
+      DM{ar, ds_map(ds, pc, pcf, v, rr, nw)}
 
-def ds_loop(pvs: List<&2, Pv>, +ci: List<&2, U32>, +nw: U32, ds: List<&2, DS>) -> List<&2, DS>:
-  match pvs ds:
+def ds_loop(pvs: List<&2, Pv>, +k: U32, +nw: U32, st: DM) -> DM:
+  match pvs st:
     case Nil{} _:
-      ds
-    case _ Nil{}:
-      Nil{}
-    case h <> t _:
-      ds_loop(t, ci, nw, ds_one(h, ci, nw, ds))
+      st
+    case h <> t DM{ar, ds}:
+      ds_loop(t, (k + 1 : U32), nw, ds_one(h, nw, ds, Array.get(VR, ar, k)))
 
 def ds_init(rs: List<&2, Rw>, +ci: List<&2, U32>, +nw: U32, +nwd: U32, +id: U32) -> List<&2, DS>:
   match rs:
@@ -1211,7 +1215,7 @@ def ds_init(rs: List<&2, Rw>, +ci: List<&2, U32>, +nw: U32, +nwd: U32, +id: U32)
       Nil{}
     case r <> t:
       match r:
-        case Sp{rid, w, act, ina, rhs, oc, r0}:
+        case Sp{rid, w, act, own, log, oc, r0}:
           ds_init(t, ci, nw, nwd, id)
         case Dn{rid, +co, rhs}:
           DS{id, co, dn_dense(ci, 0, co, nw, zero_vec(nwd), nwd), rhs} <> ds_init(t, ci, nw, nwd, (id + 1 : U32))
@@ -1224,13 +1228,6 @@ def ds_dgs(ds: List<&2, DS>, acc: List<&2, DT>) -> List<&2, DT>:
       match d:
         case DS{id, co, a, rhs}:
           ds_dgs(t, DTLeaf{DG{id, 0, a, rhs}} <> acc)
-
-def rw_dgs(rs: List<&2, Rw>, +ci: List<&2, U32>, +zero: G.Vec, +nws: U32, +nwd: U32, +id: U32, acc: List<&2, DT>) -> List<&2, DT>:
-  match rs:
-    case Nil{}:
-      List.reverse(&2, DT, acc)
-    case r <> rest:
-      rw_dgs(rest, ci, zero, nws, nwd, (id + 1 : U32), DTLeaf{rw_dg(r, id, ci, zero, nws, nwd)} <> acc)
 
 # (position, symbol) pairs -> (column, symbol) pairs by walking Ci
 def zip_ci(syms: List<&2, G.Vec>, ci: List<&2, U32>, acc: List<&2, Pr>) -> List<&2, Pr>:
@@ -1297,7 +1294,7 @@ def p3_set(+pc: U32, q: Q3) -> Array<G.Vec>:
 
 def p3_one(pv: Pv, ca: Array<G.Vec>) -> Array<G.Vec>:
   match pv:
-    case Pv{+pc, pcf, oc, r0, pina, prhs}:
+    case Pv{+pc, pcf, own, log, oc, r0}:
       p3_set(pc, q3_fold(oc, pc, Q3{ca, r0, 0}))
 
 def p3_loop(pvs: List<&2, Pv>, ca: Array<G.Vec>) -> Array<G.Vec>:
@@ -1383,18 +1380,21 @@ def phase2_fin(res: Maybe<&2, List<&2, Pr>>, +n: U32, ci: List<&2, U32>, +l: U32
 def phase2.go3(+n: U32, +ci: List<&2, U32>, ts: List<&2, DT>, pivs: List<&2, Pv>, l: U32, +sw: U32, +nwd: U32) -> Maybe<&2, List<&2, G.Vec>>:
   phase2_fin(dg_run(par_for(n, (sw + nwd : U32)), dt_build(32n, ts), n, nwd), n, ci, l, pivs)
 
-# leftover sparse rows (only their inactive part is left) + dense rows (corrected for every pivot)
-def phase2.go2(+n: U32, +ci: List<&2, U32>, +rs: List<&2, Rw>, +pivs: List<&2, Pv>, l: U32, +sw: U32, +nw: U32) -> Maybe<&2, List<&2, G.Vec>>:
-  +nwd = nwords(n)
-  phase2.go3(n, ci, rw_dgs(rs, ci, zero_vec(nwd), nw, nwd, 1, Nil{}), pivs, l, sw, nwd)
+def ds_fin(dm: DM) -> List<&2, DS>:
+  match dm:
+    case DM{ar, ds}:
+      ds
 
-def phase2.go2d(+n: U32, +ci: List<&2, U32>, +rs: List<&2, Rw>, +pivs: List<&2, Pv>, l: U32, +sw: U32, +nw: U32, ds: List<&2, DS>) -> Maybe<&2, List<&2, G.Vec>>:
-  +nwd = nwords(n)
-  phase2.go3(n, ci, ds_dgs(ds, rw_dgs(rs, ci, zero_vec(nwd), nw, nwd, 1, Nil{})), pivs, l, sw, nwd)
+# leaves of the Ci system: leftover rows (lr) and corrected dense rows (dm)
+def phase2.go2(+n: U32, +ci: List<&2, U32>, +pivs: List<&2, Pv>, l: U32, +sw: U32, +nwd: U32, lr: LR, +dn: List<&2, Rw>, +nw: U32, +ords: List<&2, Pv>) -> Maybe<&2, List<&2, G.Vec>>:
+  match lr:
+    case LR{ar, out}:
+      phase2.go3(n, ci, ds_dgs(ds_fin(ds_loop(ords, 0, nw, DM{ar, ds_init(dn, ci, nw, nwd, 1000000000)})), out), pivs, l, sw, nwd)
 
-def phase2.go(+ci: List<&2, U32>, +rs: List<&2, Rw>, +dn: List<&2, Rw>, +pivs: List<&2, Pv>, l: U32, sw: U32, +nw: U32) -> Maybe<&2, List<&2, G.Vec>>:
+def phase2.go(+ci: List<&2, U32>, rs: List<&2, Rw>, +dn: List<&2, Rw>, +pivs: List<&2, Pv>, l: U32, sw: U32, +nw: U32) -> Maybe<&2, List<&2, G.Vec>>:
   +n = U32.from_nat(List.length(&2, U32, ci))
-  phase2.go2d(n, ci, rs, pivs, l, sw, nw, ds_loop(pivs, ci, nw, ds_init(dn, ci, nw, nwords(n), 1000000000)))
+  +ords = List.reverse(&2, Pv, pivs)
+  phase2.go2(n, ci, pivs, l, sw, nwords(n), lr_loop(rs, ci, 1, LR{mat_pivs(ords, 0, ci, Array.new(VR, clog(U32.from_nat(List.length(&2, Pv, pivs))), VR{G.VNil{}, G.VNil{}})), Nil{}}), dn, nw, ords)
 
 def phase2(rs: List<&2, Rw>, dn: List<&2, Rw>, +pivs: List<&2, Pv>, +l: U32, sw: U32, +nw: U32) -> Maybe<&2, List<&2, G.Vec>>:
   phase2.go(compl(U32.to_nat(l), 0, List.sort(~U32, ~u32_le, pivcols(pivs, Nil{})), Nil{}), rs, dn, pivs, l, sw, nw)
@@ -1402,7 +1402,9 @@ def phase2(rs: List<&2, Rw>, dn: List<&2, Rw>, +pivs: List<&2, Pv>, +l: U32, sw:
 def phase1_fin(st: P1, l: U32, sw: U32, nw: U32) -> Maybe<&2, List<&2, G.Vec>>:
   match st:
     case P1{rows, wt, bk, ci, dn, pivs, done}:
-      phase2(arr_rows(rows, Nil{}), dn, pivs, l, sw, nw)
+      match pivs:
+        case Pl{n, pl}:
+          phase2(arr_rows(rows, Nil{}), dn, pl, l, sw, nw)
 
 def solve_go(+l: U32, +p: U32, +sw: U32, +nrows: U32, rows: List<&2, T.Row>) -> Maybe<&2, List<&2, G.Vec>>:
   +nw = nwords(l)
@@ -1419,7 +1421,9 @@ def Solver.solve(l: U32, rows: List<&2, T.Row>) -> Maybe<&2, List<&2, G.Vec>>:
 def inactive_count.fin(st: P1, +l: U32) -> U32:
   match st:
     case P1{rows, wt, bk, ci, dn, pivs, done}:
-      (l - U32.from_nat(List.length(&2, Pv, pivs)) : U32)
+      match pivs:
+        case Pl{n, pl}:
+          (l - n : U32)
 
 def Solver.inactive_count(+l: U32, +p: U32, +rows: List<&2, T.Row>) -> U32:
   inactive_count.fin(phase1(l, p, U32.from_nat(List.length(&2, T.Row, rows)), rows, nwords(l)), l)
