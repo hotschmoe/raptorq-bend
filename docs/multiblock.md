@@ -41,20 +41,20 @@ Rules this design follows (`docs/profile.md` sections 6-7, `docs/scaling.md` rul
 2. **Leaves are tail-recursive loops.** A leaf (one worker, or a single block) runs its blocks one after the other in `leaf(..)`, a tail loop whose body is
    `blk(cx, sbn, inputs)`. The fork-free recursion sits in its own def, never in the def that contains the fork (`docs/scaling.md` rule 4: a def that merely
    contains a parallel `let` makes all its non-tail calls heap-allocate continuations at `--threads > 1`). The per-block code (`Solver.apply`, `Flat.*`) is
-   tail loops over arrays: measured, one leaf runs at the same speed at `--threads 1`, 2 and 8 (275 / 275 / 275 ms for 8 blocks).
+   tail loops over arrays: measured, one leaf runs at the same speed at `--threads 1`, 2 and 8 (257 / 254 / 255 ms for 8 blocks).
 3. **No sharing of `Data` between leaves where it can be avoided.** The source symbols are dropped down the tree (`List.drop` of the left part), the received
    packets are *routed* down the tree: every node partitions its packet list by `sbn < mid` (order-preserving), so a leaf only ever sees its own blocks'
-   packets and no list is scanned once per block (a 64-block, 56000-packet decode partitions in 6 passes, the first sequential and the rest inside tasks).
+   packets and no list is scanned once per block (a 64-block, 64000-packet decode partitions in 6 passes, the first sequential and the rest inside tasks).
 4. **Plans are shared, per K and (decoder) per ESI sequence.** The plan (symbol-independent half of the solve, `Codec.plan_for`) depends only on K and which
    ESIs arrive in which order. All ZL blocks have K_L, all ZS blocks K_S, so the encoder computes at most two plans (`Codec.encoder_plan`, concurrently),
    once, before the tree. The decoder takes the packets of the first block of each class, computes `plan_for(K, esis)` for those two (concurrently), and every
    block whose ESI sequence is *identical* to its class representative's reuses that plan; a block with a different loss pattern builds its own inside its
    leaf. `tests/blocks_test.bend` checks both (the "same losses in every block" and "different per block" scenarios).
 5. **Fused encode + repair on the flat arena** (`encode_repair`): `Codec.encode_with_plan` returns an `Enc` (trees of boxed words for the L intermediate
-   symbols) and `Codec.symbols` copies them back into a flat array. `Blocks.encode_repair` instead does what `Codec.decode_with_plan` already does:
-   `Solver.apply_arena` and `Flat.encode_arena` inside the leaf, no tree conversion of the intermediate symbols and no `Enc`/`Obj`. It reaches into two
-   internals of `raptorq.bend` (`wp.rhs`, `wp.ok`), see "Requests". `encode_syms` + `repair` (the `Obj` path, random access to any symbol later) is
-   1.8x more work for the same repair symbols (1038 ms vs 585 ms for 16 blocks of K = 1000, T = 1024, one thread).
+   symbols) and `Codec.symbols` copies them back into a flat array. `Blocks.encode_repair` instead uses the linear flat encoder of `docs/codec.md`
+   (`Codec.encode_with_plan_flat(0, ..)` keeps the solved arena, `Codec.symbols_flat` generates the repair symbols from it, `Codec.out_vecs` reads them out) inside the leaf: no tree
+   conversion of the intermediate symbols and no `Enc`/`Obj`. `encode_syms` + `repair` (the `Obj` path, random access to any symbol later) is 1.8x more work for the same
+   repair symbols (1038 ms vs 585 ms for 16 blocks of K = 1000, T = 1024, one thread, measured with the previous internal version of the same idea; the linear API gives 534 ms).
 
 The decoder returns the K source symbols re-encoded from the intermediate symbols (like `Codec.decode_with_plan`); received source symbols are not copied through.
 
@@ -75,111 +75,113 @@ The decoder returns the K source symbols re-encoded from the intermediate symbol
 ## Results: how Bend scales on this workload
 
 **Workload.** One object of Z = 64 source blocks of K = 1000 symbols of T = 1024 octets (65.5 MB; Kt = 64000, ZL = 0, one K class, so one plan), N = 1.
-*Encode* = `Blocks.encode_repair`: the plan (`Codec.encoder_plan`, sequential, ~27 ms) once, then per block the solve on the arena and 879 repair symbols
+*Encode* = `Blocks.encode_repair`: the plan (`Codec.encoder_plan`, sequential, ~14 ms) once, then per block the solve on the arena and 879 repair symbols
 (K - ceil(K/8) + 4), read out as `Vec` symbols. *Decode* = `Blocks.decode_syms` from exactly K symbols per block, 7/8 of them repair (the hard case of
-`docs/benchmarks.md`), the same ESIs in every block (shared plan: the representative's plan takes ~25 ms). The decoded blocks are compared with the source
+`docs/benchmarks.md`), the same ESIs in every block (shared plan: the representative's plan takes ~12 ms). The decoded blocks are compared with the source
 (`ok=1`, outside the timed phases). Source generation and packet building are not included.
 
-**Machine and honesty.** 12 cores that are not equal (`docs/scaling.md`): 8 Cortex-A720 (2.2-2.6 GHz) and 4 Cortex-A520 at 1.8 GHz that are ~3.5x slower; the
-box was shared (load average 3-6 from other jobs during these runs, 13-20 earlier in the day), so every multi-thread number is a lower bound. Bend 2.0.34,
-native binaries, IO `main`, wall clock of each phase, **min of 5 runs**, `tools/blocks_sweep.sh` (raw lines in its output). Rows with <= 8 threads are pinned to
-the 8 big cores (`taskset`), 1 thread to one A720 (2.5 GHz), 12 threads is unpinned. Speedup = 1 thread / t threads; "eff" = speedup / t. The 1-thread time is
-the same code at `--threads 1` (the runtime's `seq` fast path), not a different algorithm.
+**Machine and honesty.** 12 cores that are not equal (`docs/scaling.md`): 8 Cortex-A720 (2.2-2.6 GHz) and 4 Cortex-A520 at 1.8 GHz that are ~3.5x slower. The
+box was shared: another user's builds kept the load average at 13-20 earlier in the day and at 3-6 during these runs, so every multi-thread number is a lower bound
+and runs differ by 10-30% (an earlier, busier sweep gave 4.8x / 6.7x at 8 threads for plain forks; the table below is the later one). Bend 2.0.34, native binaries, IO
+`main`, wall clock of each phase, **min of 5 runs**, `tools/blocks_sweep.sh` (raw lines in `build/blocks_sweep.txt`). Rows with <= 8 threads are pinned to the 8 big
+cores (`taskset`), 1 thread to one A720 (2.5 GHz), 12 threads is unpinned. Speedup = 1 thread / t threads; "eff" = speedup / t. The 1-thread time is the same code at
+`--threads 1` (the runtime's `seq` fast path), not a different algorithm.
 
 | threads | encode+repair, w = t leaves | speedup | eff | w = 64 leaves | speedup | eff | `!` call, w = t | speedup |
 |---|---|---|---|---|---|---|---|---|
-| 1 | 1981 ms | 1.00x | 100% | | | | | |
-| 2 | 985 | 2.01x | 101% | 984 | 2.01x | 101% | 987 | 2.01x |
-| 4 | 542 | 3.65x | 91% | 537 | 3.69x | 92% | 535 | 3.70x |
-| 8 | 414 | 4.79x | 60% | **334** | **5.93x** | 74% | 406 | 4.88x |
-| 12 | 441 | 4.49x | 37% | 341 | 5.81x | 48% | 403 | 4.92x |
+| 1 | 1933 ms | 1.00x | 100% | | | | | |
+| 2 | 955 | 2.02x | 101% | 946 | 2.04x | 102% | 958 | 2.02x |
+| 4 | 522 | 3.70x | 93% | 517 | 3.74x | 93% | 522 | 3.70x |
+| 8 | 301 | 6.42x | 80% | 300 | 6.44x | 81% | 309 | 6.26x |
+| 12 | 377 | 5.13x | 43% | **275** | **7.03x** | 59% | 376 | 5.14x |
 
 | threads | decode, w = t leaves | speedup | eff | w = 64 leaves | speedup | eff | `!` call, w = t | speedup |
 |---|---|---|---|---|---|---|---|---|
-| 1 | 2908 ms | 1.00x | 100% | | | | | |
-| 2 | 1361 | 2.14x | 107% | 1207 | 2.41x | 120% | 1361 | 2.14x |
-| 4 | 715 | 4.07x | 102% | 670 | 4.34x | 109% | 709 | 4.10x |
-| 8 | 435 | 6.69x | 84% | 435 | 6.69x | 84% | 485 | 6.00x |
-| 12 | 519 | 5.60x | 47% | 436 | 6.67x | 56% | 526 | 5.53x |
+| 1 | 2834 ms | 1.00x | 100% | | | | | |
+| 2 | 1311 | 2.16x | 108% | 1169 | 2.42x | 121% | 1320 | 2.15x |
+| 4 | 682 | 4.16x | 104% | 654 | 4.33x | 108% | 693 | 4.09x |
+| 8 | 396 | 7.16x | 89% | 398 | 7.12x | 89% | 416 | 6.81x |
+| 12 | 494 | 5.74x | 48% | **369** | **7.68x** | 64% | 481 | 5.89x |
 
-Efficiencies above 100% are real: the 1-thread run touches the whole 1 GB working set from one core, the per-block cost there is 45 ms against 40 ms for a
-16-block object (cache / TLB / allocator growth), and the other cores clock up to 2.6 GHz against 2.5 for the baseline core. With 8 + 4 cores the capacity-weighted
-ideal is ~7.7x (8 big cores) and ~8.8x (adding the 4 little ones at ~0.28 each), not 8 and 12.
+Efficiencies above 100% are real: the 1-thread run touches the whole 1 GB working set from one core (per-block cost 30 ms / 44 ms at 64 blocks against 30 / 38 ms for
+a 16-block object: cache, TLB and allocator growth) and the other cores clock up to 2.6 GHz against 2.5 for the baseline core. The capacity-weighted ideal of this
+machine is ~7.7x for the 8 big cores and ~8.8x with the 4 little ones (~0.28 of a big core each), not 8 and 12.
 
 **The ceiling: no Bend scheduler at all.** `procs` = t independent single-thread *processes*, one per big core, each doing 64/t blocks (each computes its own
-plan), time = the slowest one: encode 1011 / 528 / 321 ms (1.96 / 3.75 / **6.17x**) and decode 1370 / 679 / 391 ms (2.12 / 4.28 / **7.44x**) at 2 / 4 / 8. That is what
-this box allows this workload when nothing is shared. The block tree reaches 5.93x of 6.17x (96%) for encode and 6.69x of 7.44x (90%) for decode at 8 threads (w = 64;
-with w = 8 leaves: 78% / 90%). The rest of the gap between 6.2x and 8x is the machine, not Bend: eight processes that each need 275 ms alone for their 8 blocks need
-321 ms when they run together (shared L3 / DRAM bandwidth, frequency, the other jobs on the box).
+plan), time = the slowest one: encode 982 / 516 / 305 ms (1.97 / 3.75 / **6.34x**) and decode 1330 / 646 / 364 ms (2.13 / 4.39 / **7.79x**) at 2 / 4 / 8. That is what
+this box allows this workload when nothing is shared. The block tree reaches 6.44x of 6.34x (100%) for encode and 7.12x of 7.79x (91%) for decode at 8 threads.
+The gap between 6.3-7.8x and the capacity ideal of 7.7x is the machine, not Bend: eight processes that each need 252 ms alone for their 8 blocks need 305 ms when they run together
+(shared L3 / DRAM bandwidth, frequency, the other jobs on the box).
 
-**Per-block cost against the single-block numbers** (one thread pinned to an A720, K = 1000, T = 1024): Z = 1 takes 58 ms to encode (plan 27 + block 31, incl.
-the 879 repair symbols) and 65 ms to decode (plan 25 + block 40); the marginal block costs 31 ms (encode) and 40 ms (decode) for Z = 2 .. 16 (per block 45 / 41 ms at Z = 16),
-47 ms at Z = 64 (cache / allocator effects). A single-block decode in the same file as `docs/benchmarks.md` is now 65 ms (was 93 ms before the flat-program apply; the
-Rust crate: 5.9 ms). So sharing the plan across blocks saves 27 ms of 58 (encode) and 25 of 65 (decode) per additional block: 64 blocks cost 1981 ms instead of
-64 x 58 = 3712 ms (1.9x) to encode and 2908 ms instead of 64 x 65 = 4160 ms (1.4x) to decode. With a different ESI pattern per block the decoder has to build
-a plan per distinct pattern: Z = 16 decodes in 738 ms instead of 589 ms (+25%) on one thread, and the extra plans are inside the leaves (131 vs 129 ms at 8 threads).
+**Per-block cost against the single-block numbers** (one thread pinned to an A720, K = 1000, T = 1024, min of 6): Z = 1 takes 44 ms to encode (plan ~14 + block ~30, incl. the 879
+repair symbols) and 50 ms to decode (plan ~12 + block ~38); every further block costs 30-33 ms (encode) and 38-40 ms (decode) for Z = 2 .. 16 (per block 31 / 39 ms at Z = 16)
+and 30 / 44 ms at Z = 64 (cache / allocator effects). The single-block decode of `docs/benchmarks.md` was 93 ms before the flat-program apply and the Rust crate needs 5.9 ms.
+So sharing the plan saves ~14 of 44 ms (encode) and ~12 of 50 ms (decode) per additional block: 64 blocks cost 1933 ms instead of 64 x 44 = 2816 ms (1.46x) to encode and
+2834 ms instead of 64 x 50 = 3200 ms (1.13x) to decode. With a different ESI pattern per block (`bench ... pat=1`, Z = 16) every pattern builds its own plan inside its leaf: decode
+562 -> 737 ms on one thread (+31%), 112 -> 133 ms at 8 threads (+19%); the encoder is unaffected (535 vs 532 ms: its plan depends on K only).
 For scale: the Rust crate (single threaded, no multi-block parallelism) needs 64 x 5.9 = 378 ms to decode this object and 64 x 4.4 = 282 ms to encode + generate 1000
-repair symbols per block with a cached plan; Bend at 8 threads takes 435 and 334 ms, i.e. about one Rust core.
+repair symbols per block with a cached plan; Bend at 8 threads takes 398 and 300 ms, i.e. about one Rust core.
 
-**Size of the object (leaf granularity), 8 threads on the big cores, w = Z, 1 thread -> 8 threads:**
+**Size of the object, 8 threads on the big cores, w = Z, 1 thread -> 8 threads** (min of 6):
 
 | Z (blocks) | encode+repair | decode |
 |---|---|---|
-| 8 | 276 -> 79 ms (3.49x) | 336 -> 86 ms (3.91x) |
-| 16 | 513 -> 101 (5.08x) | 641 -> 150 (4.27x) |
-| 32 | 1003 -> 176 (5.70x) | 1340 -> 223 (6.01x) |
-| 64 | 1981 -> 334 (5.93x) | 2908 -> 435 (6.69x) |
-| 128 | 3961 -> 608 (6.51x) | 6991 -> 898 (7.79x) |
+| 8 | 252 -> 54 ms (4.67x) | 304 -> 65 ms (4.68x) |
+| 16 | 487 -> 108 (4.51x) | 615 -> 130 (4.73x) |
+| 32 | 970 -> 199 (4.87x) | 1280 -> 253 (5.06x) |
+| 64 | 1933 -> 300 (6.44x) | 2834 -> 398 (7.12x) |
+| 128 | 3867 -> 580 (6.67x) | 6835 -> 783 (8.73x) |
 
-(8 blocks on 8 threads is one block per thread and the sequential plan is 27 of 79 ms; every doubling of Z amortises it and the load imbalance of an uneven
-number of blocks per thread. The 7.79x at Z = 128 is helped by the 1-thread baseline's cache effects, see above.)
+Small objects are dominated by fixed costs of ~50 ms that do not shrink with threads (the sequential plan, ~14 ms, plus waking the pool and the first region), so 8 blocks on 8 threads
+reach 4.7x; from 64 blocks on the fixed part is below 20% of the 8-thread time. The 8.7x at Z = 128 is helped by the 1-thread baseline's cache effects (53 ms per block there).
 
 ### Interpretation: what Bend does and does not give here
 
-* **It scales, with one trick.** Blocks are a textbook coarse-grained fork-join workload (31-47 ms leaves, no sharing between leaves except the read-only plan) and
-  that is the shape the runtime handles well (`docs/scaling.md` rules 1 and 3): one top-level region per phase, balanced tree, tail-loop leaves, results appended
-  on the way back up. 8 big cores give 5.9x (encode) / 6.7x (decode) over one core: 96% / 90% of what 8 independent processes get on the same box with one leaf per block (78% / 90% with 8 leaves).
-  Nothing in the per-block code needed to know about threads: one leaf runs at the same speed at `--threads` 1, 2 and 8 (275 / 275 / 275 ms for 8 blocks), because the
-  per-block work is array tail loops (`Solver.apply`'s flat program, `Flat.encode_arena`), not recursive tree code.
-* **The trick is over-decomposition.** The runtime deals each task to a thread once and never moves it (no work stealing): a tree with exactly as many leaves as
-  threads is gated by its slowest leaf. One leaf per block (w = 64 or w = Z) beat w = 8 by 24% for encoding (334 vs 414 ms) and by 17% for decoding at 12 threads, and made 12
-  threads (5.8x / 6.7x) as good as 8 pinned big cores; with w = 12 the 12-thread run is *worse* than the 8-thread one (4.5x vs 4.8x encode, 5.6x vs 6.7x decode) because the 4 A520
-  cores are 3.5x slower and the join waits for them. The register-loop calibration of the same tree shows the same effect in pure form (2562 ms at 1 thread; 1289 at 2 and at
-  4 threads with w = t leaves, 695 at 8, but 765 at 4 threads when w = 64; `blocks_lab calib`): with only t leaves two of them can land on one thread. Over-decomposing 8x costs nothing
-  measurable (a task costs tens of nanoseconds, `docs/scaling.md`).
-* **What limits it** (largest first): (1) the machine: 12 cores are ~8.8 big-core equivalents, eight concurrent processes slow each other by 17-20% (memory), other
-  jobs on the box; (2) Amdahl: the plan (27 ms encode, 25 ms decode) is sequential before the tree, 7% of the 8-thread encode, and only 2-way parallel at best (K_L and K_S
-  plans); (3) static task placement without stealing (w = t vs w = 64); (4) the 4 little cores at 12 threads. Not limiting: fork overhead (1 region + ~64 tasks), plan sharing
-  (below), the non-tail penalty of `docs/profile.md` section 6 (leaf code is tail loops; measured above), allocation (per-lane free lists: RSS is 1.1 GB for 1, 8 or 12
-  threads and drops to 0.8 GB with one leaf per block).
+* **It scales, on exactly the shape the runtime handles.** Blocks are a coarse-grained fork-join workload (30-45 ms leaves, no sharing between leaves except the read-only plan) and
+  that is what `docs/scaling.md` rules 1 and 3 say the runtime handles well: one top-level region per phase, balanced tree, tail-loop leaves, results appended on the way back up.
+  8 big cores give 6.4x (encode) / 7.1x (decode) over one core, 100% / 91% of what 8 independent processes get on the same box, and 12 cores 7.0x / 7.7x (with over-decomposition, below).
+  Nothing in the per-block code needed to know about threads: one leaf runs at the same speed at `--threads` 1, 2 and 8 (257 / 254 / 255 ms for 8 blocks, `w = 1`), because the
+  per-block work is array tail loops (`Solver.apply`'s flat program, `Flat.generate`), not recursive tree code.
+* **Over-decompose when the cores are unequal or busy.** The runtime deals each task to a thread once and never moves it (no work stealing): a tree with exactly as many leaves as
+  threads is gated by its slowest leaf. With 12 threads (8 A720 + 4 A520 that are 3.5x slower) a 12-leaf tree gives 5.1x / 5.7x, *worse* than 8 pinned threads (6.4x / 7.2x), because the
+  join waits for the leaves that landed on little cores; 64 leaves (one per block) give 7.0x / 7.7x, i.e. the extra cores are worth ~10% over 8 big cores. At 8 big cores the two
+  agreed in this sweep (300 vs 301 ms; in the earlier, busier sweep 334 vs 414 ms encode). The register-loop calibration of the same tree shows the effect in pure form
+  (`blocks_lab calib`: 2569 ms at 1 thread; 1288 at 2 and 1285 at 4 threads with w = t leaves, 689 at 8; but 765 ms at 4 threads when w = 64): with only t leaves two of them can
+  land on one thread. Over-decomposing 8x costs nothing measurable (a task is tens of nanoseconds, `docs/scaling.md`), so `w = Z` is the recommended setting (the demo's default).
+* **What limits it** (largest first): (1) the machine: 12 cores are ~8.8 big-core equivalents, eight concurrent processes slow each other by ~20% (memory), other jobs on the
+  box; (2) Amdahl: the plan (~14 ms encode, ~12 ms decode) is sequential before the tree: 5% of the 8-thread encode and the reason an 8-block object reaches only 4.7x;
+  (3) static task placement without stealing (w = t vs w = 64 at 12 threads); (4) the 4 little cores. Not limiting: fork overhead (1 region + ~64 tasks), plan sharing
+  (below), the non-tail penalty of `docs/profile.md` section 6 (leaf code is tail loops; measured above), allocation (per-lane free lists: RSS is 1.1 GB for 1 or 8
+  threads and 0.83 GB with one leaf per block at 8 threads).
 * **Sharing the plan is free, now.** I expected the shared `Plan` (a `Data` list structure read by every task) to be the scaling trap of `docs/scaling.md` section G
-  (atomic refcounts on shared nodes). With the flat-program `Solver.apply` (each application compiles the plan to a private array program, 2 ms at K = 1000) it is not: 64 sub-objects
-  that each compute their own plan are *slower* (t = 8: 834 ms for encode + decode against 738 ms; with 64 private plans 1747 ms; t = 4: 1432 vs 1240). The plan costs 27 ms to build and
-  2 ms per block to compile, shared or not.
-* **`!` buys nothing on the CPU.** `Blocks.encode_repair!(..)` / `decode_syms!(..)` (clang 19 build of `tools/blocks_lab.bend`, `--gpu off`) give the same curves within noise (4.9x vs 4.8x
-  encode at 8 threads, 6.0x vs 6.7x decode; same calibration curve). The block tree is already the "outermost parallel call" `!` is meant to hand over; on this machine the CPU
-  fallback uses the same fork-join pool.
-* **Against C.** One Rust core does this object's decode in 378 ms; Bend needs 8 big cores for 435 ms. The per-core gap of `docs/benchmarks.md` (7-25x) is not closed by
-  multi-block parallelism, it is hidden by it: Bend on all 12 cores (~8.8 big-core equivalents) is worth ~0.9 of one Rust core on this workload; a Rust build that parallelised over blocks
+  (atomic refcounts on shared nodes). With the flat-program `Solver.apply` (each application compiles the plan to a private array program, ~2 ms at K = 1000) it is not: 64 sub-objects
+  or 8 sub-objects that each compute their own plan (`blocks_lab priv`) are *slower*: at t = 8, 788 ms for encode + decode against 697 ms with the shared plan (+13%); t = 4: 1389 vs 1204;
+  t = 12: 1129 vs 871. The plan costs ~14 ms to build and ~2 ms per block to compile, shared or not.
+* **`!` buys nothing on the CPU.** `Blocks.encode_repair!(..)` / `decode_syms!(..)` (clang 19 build of `tools/blocks_lab.bend`, `--gpu off`) give the same curves within noise or slightly worse
+  (6.26x vs 6.42x encode at 8 threads, 6.81x vs 7.16x decode; the same calibration curve). The block tree already is the "outermost parallel call" `!` is meant to hand over; on
+  this machine it uses the same fork-join pool.
+* **Against C.** One Rust core does this object's decode in 378 ms; Bend needs 8 big cores for 398 ms. The per-core gap of `docs/benchmarks.md` (7-25x) is not closed by
+  multi-block parallelism, it is hidden by it: Bend on all 12 cores (~8.8 big-core equivalents) is worth about one Rust core on this workload; a Rust build that parallelised over blocks
   would scale the same way and stay ~8x ahead.
 
 ### Reproducing
 ```
 export PATH="$HOME/.bend/bin:<dir with clang -> /usr/bin/clang-19>:/usr/bin:/bin" BEND_NO_TELEMETRY=1      # clang 19 only for the `!` call sites of blocks_lab
-tools/blocks_sweep.sh 64 1000 1024 5                      # the tables above (about 20 minutes; build/blocks_sweep.txt has the raw lines)
+tools/blocks_sweep.sh 64 1000 1024 5                      # the tables above (about 10 minutes; build/blocks_sweep.txt has the raw lines)
 bend src/blocks_demo.bend -o build/blocks_demo            # clang 14 is fine for the library and this demo
 ./build/blocks_demo --threads 8 -- bench 64 1000 1024 0 64 1     # bench Z K T [pat [W [fused]]]: gen / enc / rep / dec / verify, one BLOCKS line
 bend tools/blocks_lab.bend -o build/blocks_lab && ./build/blocks_lab --threads 8 --gpu off -- bench 64 1000 1024 64 1     # `!` variant (last arg 1)
 ```
-Notes for builders: with clang 14 the whole program is one huge function (`work_loop` with every def inlined); a program that reaches `raptorq` + `blocks` + a main with several
-dozen defs (about 2.85 MB of C) hits a clang 14 backend crash ("Cannot scavenge register without an emergency spill slot"). `src/blocks_demo.bend` is kept under that limit
-(its calibration / `!` / private-plan experiments live in `tools/blocks_lab.bend`, which needs clang 19 anyway); growing `raptorq`/`solver`/`flat` further can break it.
+Notes for builders: with clang 14 the whole program is one huge function (`work_loop` with every def inlined); while writing this a program that reached `raptorq` + `blocks` + a main with
+several dozen defs (about 2.85 MB of C) hit a clang 14 backend crash ("Cannot scavenge register without an emergency spill slot"), and compiled again after the demo's
+`Cx`/stage code was slimmed. `src/blocks_demo.bend` (3.0 MB of C) builds with clang 14 today; its calibration / `!` / private-plan experiments live in `tools/blocks_lab.bend`, which needs
+clang 19 anyway. Growing `raptorq`/`solver`/`flat` further can bring the cliff back.
 
 ## Requests (for the owners of `src/raptorq.bend`, `src/solver.bend`)
-1. **A public fused entry** `Codec.repair_with_plan(k, t, plan, source, n) -> Maybe<List<Sym>>` (= `wp.rhs` + `wp.ok` + `Solver.apply_arena` + `Flat.encode_arena`): `Blocks.encode_repair`
-   currently calls the internals `Q.wp.rhs` and `Q.wp.ok`, and it is 1.8x cheaper than `encode_with_plan` + `symbols` (no `Enc`, no tree conversion of the L intermediate symbols).
-2. **Compile the plan once per leaf, not once per `Solver.apply`**: `apply` compiles the `Plan` into the flat program every call (2 ms at K = 1000, 6% of a 31 ms block; 128 ms of CPU for 64
+1. (done, adopted) the fused path now uses the public linear flat encoder (`encode_with_plan_flat` / `symbols_flat` / `out_vecs`); it was the same speed as my first version that called
+   the internals `wp.rhs` / `wp.ok` directly.
+2. **Compile the plan once per leaf, not once per `Solver.apply`**: `apply` compiles the `Plan` into the flat program every call (~2 ms at K = 1000, 6% of a 30 ms block; ~130 ms of CPU for 64
    blocks sharing one plan). An `apply_many(plan, [rhs ..])` (or a compiled-program value that can be cloned per block with `Array.clone`) would remove it.
-3. **A parallelisable / cheaper plan**: the 25-27 ms sequential plan is the largest Amdahl term of both phases (7% of the 8-thread encode); nothing here can overlap it.
+3. **A parallelisable / cheaper plan**: the ~14 ms sequential plan is the largest Amdahl term of both phases (5% of the 8-thread encode, 27% of an 8-block object's); nothing here can overlap it.
 4. **clang 14 inlining**: see "Notes for builders" above; either `__attribute__((noinline))` on the big segments in the generated C or a size-aware `-O` would remove the cliff (not something repo code can fix).
 5. F is a U32 here (RFC: 40 bit, objects up to 946270874880 octets); Bend has no wider integer, so larger objects need a (hi, lo) pair throughout `Oti`/`layout`.

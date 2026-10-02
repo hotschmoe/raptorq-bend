@@ -22,16 +22,18 @@ Done
 - [x] Laws/proofs started (see `docs/proofs.md` for what is proven and what is TODO)
 - [x] Flat symbol arenas (`src/flat.bend`; docs/profile.md R1/R3): repair generation, `Solver.apply`, the coefficient side of `Solver.plan`, decoder re-encode (solve 3-5x, decode 4-9x faster)
 
+- [x] Multi-block objects (`src/blocks.bend`, `docs/multiblock.md`; RFC 3.3, 4.3, 4.4: Partition[I,J], K_L, derived (T, Z, N), OTI / payload id octets, sub-blocks): bit-exact vs the crate on 11 objects incl. all
+  source / repair packets and 33 loss scenarios (`tests/vectors3`, `tests/blocks_test.bend`); blocks encoded / decoded as one balanced fork tree, one plan per K shared by all blocks; scaling measured honestly (`tools/blocks_sweep.sh`)
+
 Not done
-- [ ] Multi-block partitioning (Z > 1, RFC 4.4.1.2 / sub-blocking 4.3), OTI and payload-id framing
 - [ ] Detection of corrupt/inconsistent symbols (overdetermined systems are not checked)
 - [ ] Parity with the Rust crate's speed (currently 7-19x slower solve, 7-25x decode, 20-60x repair at T = 1024; remaining: SIMD and phase 1, docs/benchmarks.md)
 - [ ] GPU target
 - [ ] Remaining TODO proofs (GF(256) multiplication laws, solver correctness, encode/decode round trip)
 
 ## Future work
-- **Multi-block**: partition function (RFC 4.4.1.2), per-block encoders/decoders run in parallel (blocks are independent: the
-  easiest big parallel win), packet framing.
+- **Multi-block follow-ups** (docs/multiblock.md, "Requests"): a public `Codec` entry for the fused plan -> arena -> repair path (blocks.bend reaches into `wp.rhs`/`wp.ok`),
+  a cached compiled plan (`Solver.prog`) shared by all blocks of a K, F as 40 bit (needs a 64-bit-safe representation; Bend has only U32), ALC/FLUTE-style packet framing.
 - **Operation-log replay for large T** (RFC 5.4.2.2 "operation vector"): solve the matrix once per K, record the row operations,
   replay them on the symbols (and on later blocks with the same K). Rust's cached encoding plan is exactly this; it is why its
   "warm" setup is 100-600x faster than ours (docs/benchmarks.md). Also cuts decode time at T >> 16 (docs/codec.md).
