@@ -5,10 +5,10 @@
 #   at the time of every run (tools/scaling/quietcore.sh), PIN=<cpu> fixes it, PIN= disables pinning. Runs with 2..8 threads are confined to the
 #   8 big cores (BIG=0,1,6,7,8,9,10,11), runs with more threads are not pinned (the 4 Cortex-A520 are ~3.5x slower: docs/scaling.md).
 #   Bend is run in mode 0 (tree API: encoder_auto / symbols_auto / decode_auto) and mode 1 (linear flat API for setup and repair).
-# Output: build/bench_results.txt (one RUST/BEND line per run) and a min-of-reps table.   Needs: cargo, bend, a system clang first in PATH (CLAUDE.md).
+# Env: CLANG_DIR (use clang 19), BIN (binary path), OUT (results file).   Output: build/bench_results.txt (one RUST/BEND line per run) and a min-of-reps table.   Needs: cargo, bend, a system clang first in PATH (CLAUDE.md).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-export PATH="$HOME/.bend/bin:/usr/bin:/bin:$HOME/.cargo/bin:$PATH" BEND_NO_TELEMETRY=1
+export PATH="$HOME/.bend/bin:${CLANG_DIR:+$CLANG_DIR:}/usr/bin:/bin:$HOME/.cargo/bin:$PATH" BEND_NO_TELEMETRY=1   # CLANG_DIR: a directory whose `clang` is clang 19 (docs/scaling.md H)
 REPS=${1:-3}
 N=${N:-1000}
 THREADS=${THREADS:-"1 8 12"}
@@ -16,8 +16,9 @@ PIN=${PIN-auto}
 BIG=${BIG:-0,1,6,7,8,9,10,11}
 mkdir -p build
 (cd tools/bench_rs && cargo build --release -q 2>/dev/null)
-bend tools/bench/bench.bend -o build/bench >/dev/null
-OUT=build/bench_results.txt
+BIN=${BIN:-build/bench}
+bend tools/bench/bench.bend -o "$BIN" >/dev/null
+OUT=${OUT:-build/bench_results.txt}
 : > "$OUT"
 core() { if [ "$PIN" = auto ]; then bash tools/scaling/quietcore.sh 2>/dev/null; else echo "$PIN"; fi; }
 for k in 100 1000 4000 10000; do
@@ -27,7 +28,7 @@ for k in 100 1000 4000 10000; do
       for th in $THREADS; do
         if [ "$th" = 1 ] && [ -n "$PIN" ]; then pin="taskset -c $(core)"; elif [ "$th" -le 8 ] && [ "$th" -gt 1 ]; then pin="taskset -c $BIG"; else pin=; fi
         for mode in 0 1; do
-          $pin ./build/bench --threads "$th" -- "$k" "$t" "$N" "$mode" | grep '^BEND' | tee -a "$OUT"
+          $pin ./$BIN --threads "$th" -- "$k" "$t" "$N" "$mode" | grep '^BEND' | tee -a "$OUT"
         done
       done
     done

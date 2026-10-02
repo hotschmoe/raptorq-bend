@@ -23,8 +23,8 @@ inactivation-decoding solver over GF(256), systematic encoder and decoder.
   * packets are `Pkt{sbn, esi, sym}` records: only the OTI (12 octets) and the 4-octet payload id have a wire encoding (no ALC / FLUTE / UDP framing);
   * no detection of corrupt symbols: an inconsistent overdetermined system is not noticed, the decoder returns the code word
     nearest the solver's choice;
-  * speed: 7-19x slower than the Rust crate for the solve, 7-25x for decode, 20-60x for generating T = 1024 repair symbols
-    (`docs/benchmarks.md`; pure Bend, no SIMD, no foreign code);
+  * speed: 3-8x slower than the Rust crate for the solve and decode on one core (7-8x at T = 1024, 3-4x at T = 16), 1.1-1.7x for generating T = 1024 repair
+    symbols with the flat API (`docs/benchmarks.md`; pure Bend, no SIMD, no foreign code); ONE block scales only partly over cores (below, `docs/scaling.md`);
   * the GPU target (`!`) needs clang 19+, which is not available here: everything is developed on the C (and JS) targets;
   * developed on aarch64 with clang 14. Native binaries need the system clang first in `PATH`:
     `export PATH="$HOME/.bend/bin:/usr/bin:/bin:$PATH"` (the default `clang` on the dev box is a GPU-vendor build that fails with
@@ -75,25 +75,32 @@ reps = B.Blocks.encode_repair(w, oti, n, B.Blocks.split_object(oti, data))   # n
 ```
 
 ## Performance
-Native binary, aarch64 12 cores (one Cortex-A720 core for the 1-thread and Rust numbers), K source symbols, 7/8 of the decode input repair
-symbols (min of 3, ms; details and caveats in `docs/benchmarks.md`). Bend/Rust = slowdown factor of Bend (1 thread). Pure Bend: symbols are
-slices of one flat `Array<U32>` with a 64K product table, tail-recursive loops (`src/flat.bend`).
+Native binary, aarch64 12 cores (one Cortex-A720 core, cpu0, for the 1-thread and Rust numbers; 8 threads = the 8 big cores), K source symbols, 7/8 of the decode input repair
+symbols (min of 7, ms, box lightly loaded; details and caveats in `docs/benchmarks.md`). Bend/Rust = slowdown factor of Bend at one thread. Pure Bend: symbols are
+slices of one flat `Array<U32>` with a 64K product table, tail-recursive loops (`src/flat.bend`), the plan compiled to a flat program, phase 1 on flat arrays. "flat API" = `Codec.encoder_flat_auto` (docs/codec.md).
 
-| K | T | Rust setup | Bend setup 1 / 12 thr | Bend/Rust | Rust decode | Bend decode 1 / 12 thr | Bend/Rust |
+| K | T | Rust setup | Bend setup 1 thr (flat API) / 8 thr | Bend/Rust at 1 thr | Rust decode | Bend decode 1 / 8 thr | Bend/Rust at 1 thr |
 |---|---|---|---|---|---|---|---|
-| 100 | 16 | 0.3 | 2 / 6 | 6.7x | 0.3 | 3 / 2 | 10x |
-| 100 | 1024 | 0.6 | 6 / 12 | 10x | 0.6 | 8 / 8 | 13x |
-| 1000 | 16 | 2.4 | 30 / 34 | 12x | 2.1 | 31 / 30 | 15x |
-| 1000 | 1024 | 5.4 | 68 / 72 | 13x | 5.9 | 93 / 91 | 16x |
-| 4000 | 16 | 9.9 | 168 / 168 | 17x | 10 | 211 / 205 | 20x |
-| 4000 | 1024 | 23 | 354 / 354 | 15x | 27 | 499 / 491 | 19x |
-| 10000 | 16 | 30 | 557 / 536 | 19x | 30 | 734 / 724 | 25x |
-| 10000 | 1024 | 69 | 1069 / 1049 | 15x | 81 | 1541 / 1510 | 19x |
+| 100 | 16 | 0.4 | 1 / 2 | 2.5x | 0.4 | 1 / 1 | 2.5x |
+| 100 | 1024 | 0.8 | 3 / 5 | 3.8x | 0.6 | 3 / 3 | 5.0x |
+| 1000 | 16 | 3.1 | 9 / 13 | 2.9x | 2.8 | 8 / 9 | 2.9x |
+| 1000 | 1024 | 5.3 | 37 / 19 | 7.0x | 5.5 | 33 / 19 | 6.0x |
+| 4000 | 16 | 9.2 | 38 / 48 | 4.1x | 9.9 | 41 / 41 | 4.1x |
+| 4000 | 1024 | 22 | 167 / 83 | 7.5x | 24 | 157 / 100 | 6.6x |
+| 10000 | 16 | 27 | 113 / 109 | 4.2x | 26 | 123 / 124 | 4.7x |
+| 10000 | 1024 | 58 | 445 / 211 | 7.7x | 64 | 450 / 292 | 7.0x |
 
-Before the flat-symbol work (symbols as trees of boxed words) the same table read 13-55x (solve) and 12-110x (decode). The gap that is left is
-SIMD (the Rust crate uses NEON kernels; Bend 2 has no vector or narrow types: the Bend multiply-add kernel is at scalar-C parity,
-3.4 ns/word, but 7-9x from NEON) and our phase-1 bookkeeping. 12 threads no longer help: the symbol work is too cheap to slice below
-2^23 words (docs/benchmarks.md, docs/plan_apply.md).
+Before this work (commit 7b05050, same harness): K = 1000, T = 1024 setup 61 ms (12.6x of Rust in the older table), K = 4000 302 ms, decode 55 / 299 ms, repair of 1000 symbols 14 / 47 ms (now 2-3 ms with the flat API, Rust 1.2 / 1.9),
+and none of it changed with `--threads`. What changed: phase 1 and the row bookkeeping run on flat arrays (K = 4000 plan 152 -> 49 ms), the plan is compiled to a flat program (no list walks), the dense rows no longer go through a tree
+fold, repair generation has a linear flat API, and the symbol side of one block runs as ONE parallel region.
+
+**Does one block scale over cores?** Partly, and here is exactly why. Pure Bend *does* scale on one shape: a single balanced fork tree whose leaves allocate and own their arrays gets 6.5-7x at 8 threads in the scaling lab
+(`docs/scaling.md`; 8 big + 4 little cores, so 12 threads are worth ~8.4 big cores and are never better than 8). One block gets 3-3.6x on its symbol side (apply) and 1.8-2.1x end to end for setup at T = 1024 (K = 1000: 38 -> 21 ms,
+K = 4000: 170 -> 80 ms at 8 threads), 1.4-1.7x for decode, and nothing at T = 16: the rest of a block is a sequential chain (row construction, phase 1 + phase 2 of the plan, the program compile: 10 / 49 ms at K = 1000 / 4000) made of
+steps of microseconds, while a parallel region reached from sequential code costs 0.15-0.3 ms in this runtime. What Bend would need: a region round of ~10 us (or work stealing inside a region) so that per-pivot Gauss-Jordan
+and the dense-row corrections could fork, no heap-continuation penalty for defs that merely contain a fork, a safe read-only array sharing primitive (`Array.fork` exists but is `@unsafe` and fails the proof gate), and big-core
+bias or work stealing for big.LITTLE chips. The remaining single-thread gap is SIMD (the Rust crate uses NEON kernels; Bend 2 has no vector or narrow types: the multiply-add kernel is at scalar-C parity, 3 ns/word, 7-9x from NEON)
+and the sequential plan (T = 16: 3-4x of Rust).
 
 **Multi-block objects scale across cores** (`docs/multiblock.md`): 64 blocks of K = 1000 symbols of T = 1024 octets (a 65 MB object), blocks as one balanced fork tree
 (one task per block), one plan per K shared by all blocks; min of 5, 12-core aarch64 shared with other jobs (8 big + 4 little cores, so 12 threads are worth ~8.8 big cores):
