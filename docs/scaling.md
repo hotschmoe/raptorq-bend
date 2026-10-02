@@ -65,7 +65,7 @@ Codec numbers come from `tools/bench/bench.bend` / `tools/bench/run.sh` (docs/be
    Also found: **a program that contains a single `!` call is compiled without the single-thread fast path for ALL its code** (the emitted C has `work_loop(.., !BANGS && pool_size == 1)`):
    `lab_bang.bend`'s plain modes run ~10 % slower at `--threads 1` than the same code in `lab.bend`. That is why `lab.bend` is bang-free.
 5. **Disjoint slices of one array are free**: `match a: case ANode{l, r}` hands out the two halves with no copy (~2 us per slice at any size, indices are relative to the
-   slice), `ANode{x, y}` joins them; lengths are powers of two. A tree of leaf arrays built inside the tasks is as fast. No chunking primitive is needed.
+   slice), `ANode{x, y}` joins them; lengths are powers of two. A tree of leaf arrays (`type At: At{Array<U32>} | An{At, At}`, a hand-made `List<Array>` works the same: an `Array<Array<U32>>` cannot be built, `Array.new` needs a `Data` element) built inside the tasks is as fast (E, E'). No chunking primitive is needed.
 6. **Read-only sharing**: `Array.fork(U32, a)` (an `@unsafe` Base def) gives two handles of ONE array in O(1) and is correct and fast from several tasks (F), **but
    `scripts/check_proofs.sh` rejects any def that reaches an `@unsafe` def** ("N defs rely on unsafe or foreign code"), so the codec uses `Array.clone` (a 0.1-0.5 ms copy per
    task for the 0.4-1.6 MB program). **Sharing a `Data` structure (a list, e.g. `Solver.Plan`) between tasks is a scaling trap** (G vs G'): every match bumps refcounts
@@ -153,7 +153,8 @@ Before this work all of these were flat in the thread count (K = 1000: setup 61 
 * The table built by doubling saved ~1 ms per table but did not show in single-thread K = 1000 totals (inside noise); kept because every slice builds its own.
 * clang 19: faster for the codec (list-heavy phases), slower for array loops; not adopted by default.
 * Fused multi-source XOR (d = s1 ^ s2 ^ s3 in one pass) was considered; not done: the xor passes are 14.7K of 34K instructions (~4 ms of 25), the rest is multiply-add (table lookups).
-* Parallelising the plan (phase 2 dense corrections per dense row, the program compile in segments) was estimated at 5-6 % of the K = 4000 total and not done.
+* Parallelising the plan (phase 2 dense corrections per dense row, the program compile in segments) was estimated at 5-6 % of the K = 4000 total and not done. Cuts of the K = 4000 plan (1 thread, 49 ms with rows and phase 1): `p2.run` is 22 ms of it, of which the pivot vectors 5, the dense-row corrections 6, `pp_of` 3, the leftover rows 2; the Gauss-Jordan and the TC lists measured 0-2 ms each.
+* Symbol-parallel repair generation (a balanced task tree over the N output symbols, every leaf its own output array, the solved arena `Array.clone`d per task: 1.1 MB at K = 1000, T = 1024) instead of word slices: not built; the XOR work is 2.5 ms against a 0.15-0.3 ms region plus the clones, and the word-sliced `symbols_flat` already reads the slice arenas that the sliced solve left in place.
 
 ## Verdict
 
