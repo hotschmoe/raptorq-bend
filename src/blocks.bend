@@ -27,7 +27,6 @@ import ./tables.bend as T
 import ./rfc_funcs.bend as R
 import ./solver.bend as S
 import ./raptorq.bend as Q
-import ./flat.bend as F
 
 # ---------------------------------------------------------------------------
 # types
@@ -540,29 +539,26 @@ def enc_run(mp: Maybe<&2, S.Plan>, +k: U32, +t: U32, src: List<&2, G.Vec>) -> Ma
     case Some{plan}:
       Q.Codec.encode_with_plan(k, t, plan, src)
 
-# encode + repair symbols without ever building the intermediate symbols as trees: solve on the flat arena (Solver.apply_arena),
-# generate the repair symbols from it (Flat.encode_arena)
-def er_fin(ok: Bool, plan: S.Plan, rhs: List<&2, G.Vec>, +k: U32, +n: U32, +sp: T.SP) -> Maybe<&2, List<&2, G.Vec>>:
-  match ok:
-    case True{}:
-      Some{F.Flat.encode_arena(sp, k, S.Solver.apply_arena(plan, rhs), k, n)}
-    case False{}:
-      None{}
+# encode + repair symbols without ever building the intermediate symbols as trees: the linear flat encoder (`Codec.encode_with_plan_flat`
+# keeps the solved arena, `Codec.symbols_flat` generates from it, `Codec.out_vecs` reads the n symbols out); d = 0: one block = one worker
+def er_gen(g: Q.GenF, +n: U32) -> Maybe<&2, List<&2, G.Vec>>:
+  match g:
+    case Q.GenF{e, out}:
+      Some{Q.Codec.out_vecs(n, out)}
 
-def er_sp(m: Maybe<&2, T.SP>, +plan: S.Plan, +k: U32, +t: U32, +n: U32, src: List<&2, G.Vec>) -> Maybe<&2, List<&2, G.Vec>>:
+def er_enc(m: Q.MbF, +k: U32, +n: U32) -> Maybe<&2, List<&2, G.Vec>>:
   match m:
-    case None{}:
+    case Q.NoF{}:
       None{}
-    case Some{+sp}:
-      +rhs = Q.wp.rhs(sp, k, t, src)
-      er_fin(Q.wp.ok(plan, rhs, R.L(sp)), plan, rhs, k, n, sp)
+    case Q.SomeF{e}:
+      er_gen(Q.Codec.symbols_flat(e, k, n), n)
 
 def er_run(mp: Maybe<&2, S.Plan>, +k: U32, +t: U32, +n: U32, src: List<&2, G.Vec>) -> Maybe<&2, List<&2, G.Vec>>:
   match mp:
     case None{}:
       None{}
     case Some{plan}:
-      er_sp(R.params(k), plan, k, t, n, src)
+      er_enc(Q.Codec.encode_with_plan_flat(0, k, t, plan, src), k, n)
 
 def rep_one(+e: Q.Enc, +n: U32) -> List<&2, G.Vec>:
   match e:

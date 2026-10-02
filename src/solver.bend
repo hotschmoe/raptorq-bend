@@ -597,7 +597,7 @@ type Lg is Data:
 
 type Rw is Data:
   Sp{id: U32, w: U32, act: List<&2, T.Term>, own: List<&2, T.Term>, log: List<&2, Lg>, oc: List<&2, T.Term>}
-  Dn{id: U32, co: G.Vec}
+  Dn{id: U32, co: G.Vec, ts: List<&2, T.Term>}
 
 # One elimination step: pivot column pc (coefficient pcf in the pivot row), columns s = Term{column, position}
 # are inactivated (sorted by column), j = number of the pivot.
@@ -621,7 +621,7 @@ def rw_id(r: Rw) -> U32:
   match r:
     case Sp{id, w, act, own, log, oc}:
       id
-    case Dn{id, co}:
+    case Dn{id, co, ts}:
       id
 
 def is_live(r: Rw) -> Bool:
@@ -632,7 +632,7 @@ def rw_w(r: Rw) -> U32:
   match r:
     case Sp{id, w, act, own, log, oc}:
       w
-    case Dn{id, co}:
+    case Dn{id, co, ts}:
       0
 
 # ---- does the pivot step touch this row's active part? -------------------------------------
@@ -726,8 +726,8 @@ def elim(r: Rw, st: Stp) -> Rw:
       match st:
         case Stp{+pc, pcf, +s, j}:
           elim_sp.go(hit(act, pc, s), id, w, act, own, log, oc, Stp{pc, pcf, s, j})
-    case Dn{id, co}:
-      Dn{id, co}
+    case Dn{id, co, ts}:
+      Dn{id, co, ts}
 
 # ---- the state of phase 1 --------------------------------------------------------------------
 # rows : Array<Rw> by row id (dummy where a row is dense, a pivot or being worked on)
@@ -863,7 +863,7 @@ def st5(+id: U32, r: Array<Rw> & Rw, wt: Array<U32>, bk: Array<List<&2, U32>>, c
       match row:
         case Sp{rid, w, act, own, log, oc}:
           st5a(id, act, own, log, oc, rows, wt, bk, ci, dn, pivs)
-        case Dn{rid, co}:
+        case Dn{rid, co, ts}:
           P1{rows, wt, bk, ci, dn, pivs, 1}
 
 def st4(valid: Bool, rows: Array<Rw>, wt: Array<U32>, bk: Array<List<&2, U32>>, ci: Array<List<&2, U32>>, dn: List<&2, Rw>, pivs: Pl, +id: U32) -> P1:
@@ -960,7 +960,7 @@ def init_sparse(+id: U32, +act: List<&2, T.Term>, own: List<&2, T.Term>, oc: Lis
 def init_dense(id: U32, co: G.Vec, st: IN) -> IN:
   match st:
     case IN{rows, wt, bk, ci, dn}:
-      IN{rows, wt, bk, ci, Dn{id, co} <> dn}
+      IN{rows, wt, bk, ci, Dn{id, co, Nil{}} <> dn}
 
 def init_row3(dense: Bool, +id: U32, +ts: List<&2, T.Term>, +cols: List<&2, T.Term>, +l: U32, +p: U32, zero: G.Vec, nw: U32, st: IN) -> IN:
   match dense:
@@ -1195,8 +1195,18 @@ def p2.lrs(rs: List<&2, Rw>, +i: U32, +tab: Bool, +w: Nat, +nwd: U32, +wg: U32, 
       st
     case Sp{rid, w0, act, own, +log, oc} <> t Pt{a, trs}:
       p2.lrs(t, (i + 1 : U32), tab, w, nwd, wg, gb, pvb, Pt{p2.unit(i, (gb + i * wg + nwd : U32), p2.row(own, log, (gb + i * wg : U32), pvb, tab, w, nwd, a)), TR{rid, log} <> trs})
-    case Dn{rid, co} <> t Pt{a, trs}:
+    case Dn{rid, co, ts} <> t Pt{a, trs}:
       p2.lrs(t, i, tab, w, nwd, wg, gb, pvb, Pt{a, trs})
+
+# a dense row given as terms Term{column, coef}: coef xored into octet `column` of the row at slot base
+def p2.dterms(ts: List<&2, T.Term>, +base: U32, a: Array<U32>) -> Array<U32>:
+  match ts:
+    case Nil{}:
+      a
+    case Con{t, rest}:
+      match t:
+        case T.Term{+c, f}:
+          p2.dterms(rest, base, F.Flat.wxor((base + U32.shrn(c, 2n) : U32), byte_word(f, U32.and(c, 3)), a))
 
 # dense rows: full-width coefficients into the arena
 def p2.dnput(dn: List<&2, Rw>, +d: U32, +nw: U32, +dnb: U32, a: Array<U32>) -> Array<U32>:
@@ -1207,8 +1217,8 @@ def p2.dnput(dn: List<&2, Rw>, +d: U32, +nw: U32, +dnb: U32, a: Array<U32>) -> A
       match r:
         case Sp{rid, w0, act, own, log, oc}:
           p2.dnput(t, d, nw, dnb, a)
-        case Dn{rid, co}:
-          p2.dnput(t, (d + 1 : U32), nw, dnb, F.Flat.put.go(co, nw, (dnb + d * nw : U32), a))
+        case Dn{rid, co, ts}:
+          p2.dnput(t, (d + 1 : U32), nw, dnb, p2.dterms(ts, (dnb + d * nw : U32), F.Flat.put.go(co, nw, (dnb + d * nw : U32), a)))
 
 # the entries of the dense row (slot dnrow) at the columns Ci -> positions 0.. of the tail row at slot grow
 def p2.gather.f(+c: U32, +pos: U32, +grow: U32, rd: Array<U32> & U32) -> Array<U32>:
@@ -1250,7 +1260,7 @@ def p2.dense(dn: List<&2, Rw>, +d: U32, +i: U32, +ci: List<&2, U32>, +ords: List
       st
     case Sp{rid, w0, act, own, log, oc} <> t Pt{a, trs}:
       p2.dense(t, d, i, ci, ords, tab, w, nwd, wg, gb, pvb, dnb, nw, Pt{a, trs})
-    case Dn{rid, co} <> t Pt{a, trs}:
+    case Dn{rid, co, ts} <> t Pt{a, trs}:
       p2.dense(t, (d + 1 : U32), (i + 1 : U32), ci, ords, tab, w, nwd, wg, gb, pvb, dnb, nw, p2.dfin(rid, i, (gb + i * wg + nwd : U32), p2.dpiv(ords, 0, (dnb + d * nw : U32), (gb + i * wg : U32), pvb, tab, w, nwd, Dd{p2.gather(ci, 0, (dnb + d * nw : U32), (gb + i * wg : U32), a), Nil{}}), trs))
 
 # ---- Gauss-Jordan on G --------------------------------------------------------------------------------------
@@ -1395,7 +1405,7 @@ def p2.count_sp(rs: List<&2, Rw>, +acc: U32) -> U32:
       match r:
         case Sp{rid, w0, act, own, log, oc}:
           p2.count_sp(t, (acc + 1 : U32))
-        case Dn{rid, co}:
+        case Dn{rid, co, ts}:
           p2.count_sp(t, acc)
 
 def p2.count_dn(rs: List<&2, Rw>, +acc: U32) -> U32:
@@ -1406,7 +1416,7 @@ def p2.count_dn(rs: List<&2, Rw>, +acc: U32) -> U32:
       match r:
         case Sp{rid, w0, act, own, log, oc}:
           p2.count_dn(t, acc)
-        case Dn{rid, co}:
+        case Dn{rid, co, ts}:
           p2.count_dn(t, (acc + 1 : U32))
 
 # the arena machinery switches to the product table when there are enough word products to repay its 1.3 ms
@@ -1748,32 +1758,22 @@ def ig.small(+cols: List<&2, T.Term>, +rawn: U32, +id: U32, +cur: U32, +n: U32, 
 def ig.putn(ts: List<&2, T.Term>, +k: U32, a: Array<U32>) -> Array<U32>:
   ig.put(ts, k, a)
 
-# raw length > DENSE_MIN: the old normalisation (`tsort`), then dense (Vec row) or sparse (written to the arrays)
-def ig.big2(dense: Bool, nl: List<&2, T.Term>, +cols: List<&2, T.Term>, +len: U32, +id: U32, +cur: U32, +n: U32, +lim: U32, +nw: U32, zero: G.Vec, a: Array<U32>, dn: List<&2, Rw>) -> Ig:
+# a row with more than DENSE_MIN terms and more than l/4 of them (counted raw, without normalising: a dense row is just a row that is never
+# a pivot, so the classification only has to be safe): kept as its term list, written into the coefficient arena by xor in phase 2 (p2.dnput)
+def ig.row2(dense: Bool, +cols: List<&2, T.Term>, +rawn: U32, +id: U32, +cur: U32, +n: U32, +lim: U32, a: Array<U32>, dn: List<&2, Rw>) -> Ig:
   match dense:
     case True{}:
-      Ig{Array.set(U32, a, (f1.kd(n) + id : U32), 2), Dn{id, fold_terms(cols, zero, nw)} <> dn, cur}
-    case False{}:
-      ig.sparse(ig.putn(nl, cur, a), id, cur, len, n, lim, dn)
-
-def ig.big(+nl: List<&2, T.Term>, +cols: List<&2, T.Term>, +id: U32, +cur: U32, +n: U32, +l: U32, +lim: U32, +nw: U32, zero: G.Vec, a: Array<U32>, dn: List<&2, Rw>) -> Ig:
-  +len = U32.from_nat(List.length(&2, T.Term, nl))
-  ig.big2(is_dense(len, l), nl, cols, len, id, cur, n, lim, nw, zero, a, dn)
-
-def ig.row2(bigrow: Bool, +cols: List<&2, T.Term>, +rawn: U32, +id: U32, +cur: U32, +n: U32, +l: U32, +lim: U32, +nw: U32, zero: G.Vec, a: Array<U32>, dn: List<&2, Rw>) -> Ig:
-  match bigrow:
-    case True{}:
-      ig.big(tsort(cols), cols, id, cur, n, l, lim, nw, zero, a, dn)
+      Ig{Array.set(U32, a, (f1.kd(n) + id : U32), 2), Dn{id, G.VNil{}, cols} <> dn, cur}
     case False{}:
       ig.small(cols, rawn, id, cur, n, lim, a, dn)
 
-def ig.row3(+cols: List<&2, T.Term>, +rawn: U32, +id: U32, +cur: U32, +n: U32, +l: U32, +lim: U32, +nw: U32, zero: G.Vec, a: Array<U32>, dn: List<&2, Rw>) -> Ig:
-  ig.row2(U32.is_gt(rawn, DENSE_MIN()), cols, rawn, id, cur, n, l, lim, nw, zero, a, dn)
+def ig.row3(+cols: List<&2, T.Term>, +rawn: U32, +id: U32, +cur: U32, +n: U32, +l: U32, +lim: U32, a: Array<U32>, dn: List<&2, Rw>) -> Ig:
+  ig.row2(band(U32.is_gt(rawn, DENSE_MIN()), U32.is_gt((rawn * 4 : U32), l)), cols, rawn, id, cur, n, lim, a, dn)
 
 def ig.row(r: T.Row, +id: U32, +n: U32, +l: U32, +lim: U32, +nw: U32, zero: G.Vec, st: Ig) -> Ig:
   match r st:
     case T.Row{+cols, rhs} Ig{a, dn, +cur}:
-      ig.row3(cols, U32.from_nat(List.length(&2, T.Term, cols)), id, cur, n, l, lim, nw, zero, a, dn)
+      ig.row3(cols, U32.from_nat(List.length(&2, T.Term, cols)), id, cur, n, l, lim, a, dn)
 
 def ig.go(rs: List<&2, T.Row>, +id: U32, +n: U32, +l: U32, +lim: U32, +nw: U32, +zero: G.Vec, st: Ig) -> Ig:
   match rs:

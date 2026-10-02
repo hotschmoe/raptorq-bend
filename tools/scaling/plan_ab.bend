@@ -25,12 +25,14 @@ def one(+n: Nat, +l: U32, +p: U32, +k: U32, +sp: TB.SP) -> IO(Unit):
       IO.pure(Unit, Unit{})
     case 1n+q:
       do IO<Unit>:
+        +tr0 : Nat <- IO.now()
+        +c0 : U32 <- IO.pure(U32, U32.from_nat(List.length(&2, Y.Row, mk(sp, k))))
         +t0 : Nat <- IO.now()
         +c1 : U32 <- IO.pure(U32, pl_ck(S.Solver.plan_ref(l, p, mk(sp, k))))
         +t1 : Nat <- IO.now()
         +c2 : U32 <- IO.pure(U32, pl_ck(S.Solver.plan(l, p, mk(sp, k))))
         +t2 : Nat <- IO.now()
-        IO.print("PLAN ref_ms=" ++ Nat.show((t1 - t0 : Nat)) ++ " flat_ms=" ++ Nat.show((t2 - t1 : Nat)) ++ " rows=" ++ U32.show(c1) ++ "/" ++ U32.show(c2) ++ " (rows built inside both)")
+        IO.print("PLAN rows_ms=" ++ Nat.show((t0 - tr0 : Nat)) ++ " ref_ms=" ++ Nat.show((t1 - t0 : Nat)) ++ " flat_ms=" ++ Nat.show((t2 - t1 : Nat)) ++ " rows=" ++ U32.show(c1) ++ "/" ++ U32.show(c2) ++ " (rows built inside both)")
         one(q, l, p, k, sp)
 
 def go(+k: U32, +reps: U32) -> IO(Unit):
