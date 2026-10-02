@@ -16,6 +16,11 @@ the XOR loops alone: 2.5 ms) because `Codec.symbols` converts trees to a flat ar
 (solve), 7-25x (decode). Corrections made to other docs as a result: `docs/perf.md` section 5 (`Array` ops are O(1) natively, not O(log n) path copies), the
 `docs/benchmarks.md` 12-thread repair note (explained by section 6: the `seq` effect).
 
+**Update (docs/scaling.md):** the multi-thread findings of section 6 were refined: the heap-continuation penalty is not "every non-tail call" but "every non-tail
+call in a def that CONTAINS a parallel `let`" (a twin fork-free def removes it), and a program that contains a single `!` call is compiled without the
+single-thread `seq` fast path altogether. Phase 1 / row bookkeeping (#4 above) was rewritten on flat arrays (K = 4000 plan 152 -> 57 ms), repair generation has a
+linear flat API (16 -> 2 ms at K = 1000, T = 1024), and one block's symbol side runs as one parallel region.
+
 Method notes: single-thread numbers are pinned (`taskset -c 10`, an A720 at 2.5 GHz) and are the minimum of 5 runs; other jobs
 share the machine, so expect +-10-30 % noise (the C baselines moved by that much between runs). Ratios are what matter.
 `ns/word` = per 4-octet U32 word of symbol data.

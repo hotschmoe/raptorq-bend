@@ -1465,6 +1465,12 @@ def phase2(rs: List<&2, Rw>, dn: List<&2, Rw>, +pivs: List<&2, Pv>, il: List<&2,
   +dyn = List.reverse(&2, U32, il)
   phase2.go(phase2.cl2(perm, dyn, List.append(&2, U32, pivcols(pivs, Nil{}), List.append(&2, U32, dyn, perm)), l), rs, dn, pivs, l, nrows, nw)
 
+# phase 2 with the "extras" (columns that stayed active, ascending) given
+def phase2x(rs: List<&2, Rw>, dn: List<&2, Rw>, +pivs: List<&2, Pv>, il: List<&2, U32>, extras: List<&2, U32>, +p: U32, +l: U32, +nrows: U32, +nw: U32) -> Maybe<&2, Plan>:
+  +perm = perm_cols(U32.to_nat(p), (l - p : U32))
+  +dyn = List.reverse(&2, U32, il)
+  phase2.go(phase2.cl(perm, dyn, extras), rs, dn, pivs, l, nrows, nw)
+
 # ===========================================================================
 # 8. Phase 1 -> rows left over (arr_rows) and the plan driver
 # ===========================================================================
@@ -2344,15 +2350,48 @@ def f1.tcap(rs: List<&2, T.Row>, +acc: U32) -> U32:
         case T.Row{cols, rhs}:
           f1.tcap(rest, (acc + U32.from_nat(List.length(&2, T.Term, cols)) : U32))
 
-def f1.fin4(il: Il, rs: List<&2, Rw>, pvs: List<&2, Pv>, +p: U32, +l: U32, dn: List<&2, Rw>, +nrows: U32, +nw: U32) -> Maybe<&2, Plan>:
+# columns that stayed active and are neither pivot nor inactivated (state 0), ascending: the "extras" of phase 2's column order (this replaces the sort +
+# complement of the list version)
+type Ex is Type:
+  Ex{a: Array<U32>, ex: List<&2, U32>}
+
+def ex.g(z: Bool, +c: U32, ex: List<&2, U32>, a: Array<U32>) -> Ex:
+  match z:
+    case True{}:
+      Ex{a, c <> ex}
+    case False{}:
+      Ex{a, ex}
+
+def ex.f(+c: U32, ex: List<&2, U32>, rd: Array<U32> & U32) -> Ex:
+  (a, k) = rd
+  ex.g(U32.is_eq(k, 0), c, ex, a)
+
+def ex.step(+c: U32, +n: U32, st: Ex) -> Ex:
+  match st:
+    case Ex{a, ex}:
+      ex.f(c, ex, Array.get(U32, a, (f1.cs(n) + c : U32)))
+
+def ex.loop(+m: Nat, +c: U32, +n: U32, st: Ex) -> Ex:
+  match m:
+    case 0n:
+      st
+    case 1n+q:
+      ex.loop(q, (c - 1 : U32), n, ex.step(c, n, st))
+
+def f1.fin5(ex: Ex, rs: List<&2, Rw>, pvs: List<&2, Pv>, ils: List<&2, U32>, +p: U32, +l: U32, dn: List<&2, Rw>, +nrows: U32, +nw: U32) -> Maybe<&2, Plan>:
+  match ex:
+    case Ex{a, extras}:
+      phase2x(rs, dn, pvs, ils, extras, p, l, nrows, nw)
+
+def f1.fin4(il: Il, rs: List<&2, Rw>, pvs: List<&2, Pv>, +n: U32, +p: U32, +l: U32, dn: List<&2, Rw>, +nrows: U32, +nw: U32) -> Maybe<&2, Plan>:
   match il:
     case Il{a, ils}:
-      phase2(rs, dn, pvs, ils, p, l, nrows, nw)
+      f1.fin5(ex.loop(U32.to_nat(l), (l - 1 : U32), n, Ex{a, Nil{}}), rs, pvs, ils, p, l, dn, nrows, nw)
 
 def f1.fin3(lo2: Lo2, pvs: List<&2, Pv>, +nin: U32, +n: U32, +l: U32, +p: U32, dn: List<&2, Rw>, +nrows: U32, +nw: U32) -> Maybe<&2, Plan>:
   match lo2:
     case Lo2{a, rs}:
-      f1.fin4(il.loop(U32.to_nat(nin), 0, n, l, Il{a, Nil{}}), rs, pvs, p, l, dn, nrows, nw)
+      f1.fin4(il.loop(U32.to_nat(nin), 0, n, l, Il{a, Nil{}}), rs, pvs, n, p, l, dn, nrows, nw)
 
 def f1.fin2(po: Po, +nin: U32, +n: U32, +l: U32, +p: U32, dn: List<&2, Rw>, +nrows: U32, +nw: U32) -> Maybe<&2, Plan>:
   match po:
@@ -2402,57 +2441,6 @@ def Solver.plan(+l: U32, +p: U32, +rows: List<&2, T.Row>) -> Maybe<&2, Plan>:
 # about 1.3 ms, so symbols below TAB_MIN() words (T < 32 octets) use the SWAR loop instead (tab = False); measured K = 1000:
 # T = 64: 4 ms with the table vs 6 without, T = 256: 11 vs 16, T = 1024: 35 vs 61, T = 16: 3 vs 2.
 
-# pivots, in selection order: copy rhs[id], add the log entries
-def ap.pivs(pvs: List<&2, PP>, +k: U32, +tab: Bool, +w: Nat, +wu: U32, +ra: U32, +ar: U32, a: Array<U32>) -> Array<U32>:
-  match pvs:
-    case Nil{}:
-      a
-    case Con{pv, t}:
-      match pv:
-        case PP{id, pc, finv, log, oc}:
-          ap.pivs(t, (k + 1 : U32), tab, w, wu, ra, ar, ap.log(log, tab, w, wu, (ar + k * wu : U32), ar, F.Flat.cp.loop(w, 0, (ar + k * wu : U32), (ra + id * wu : U32), a)))
-
-# tail rows: R'_i = rhs[id_i] + sum g * R_k
-def ap.trs(trs: List<&2, TR>, +i: U32, +tab: Bool, +w: Nat, +wu: U32, +ra: U32, +ar: U32, +rt: U32, a: Array<U32>) -> Array<U32>:
-  match trs:
-    case Nil{}:
-      a
-    case Con{tr, t}:
-      match tr:
-        case TR{id, log}:
-          ap.trs(t, (i + 1 : U32), tab, w, wu, ra, ar, rt, ap.log(log, tab, w, wu, (rt + i * wu : U32), ar, F.Flat.cp.loop(w, 0, (rt + i * wu : U32), (ra + id * wu : U32), a)))
-
-# inactive columns: C[col] = sum f * R'_i  (the dense tail solved: a row of M = A^-1 per column)
-def ap.tail(tail: List<&2, TC>, +tab: Bool, +w: Nat, +wu: U32, +rt: U32, +ca: U32, a: Array<U32>) -> Array<U32>:
-  match tail:
-    case Nil{}:
-      a
-    case Con{tc, t}:
-      match tc:
-        case TC{col, ts}:
-          ap.tail(t, tab, w, wu, rt, ca, F.Flat.fold(ts, tab, w, wu, (ca + col * wu : U32), rt, a))
-
-# forward substitution through the original equations: C[pc_k] = finv_k * (rhs[id_k] + sum f * C[c])
-def ap.p3(pvs: List<&2, PP>, +tab: Bool, +w: Nat, +wu: U32, +ra: U32, +ca: U32, a: Array<U32>) -> Array<U32>:
-  match pvs:
-    case Nil{}:
-      a
-    case Con{pv, t}:
-      match pv:
-        case PP{id, +pc, finv, log, oc}:
-          ap.p3(t, tab, w, wu, ra, ca, F.Flat.scale(finv, tab, w, (ca + pc * wu : U32), F.Flat.fold.go(oc, tab, w, wu, (ca + pc * wu : U32), ca, F.Flat.cp.loop(w, 0, (ca + pc * wu : U32), (ra + id * wu : U32), a))))
-
-def ap.run(+pivs: List<&2, PP>, trs: List<&2, TR>, tail: List<&2, TC>, +tab: Bool, +wu: U32, +ra: U32, +ar: U32, +rt: U32, +ca: U32, a: Array<U32>) -> Array<U32>:
-  ap.p3(pivs, tab, U32.to_nat(wu), wu, ra, ca, ap.tail(tail, tab, U32.to_nat(wu), wu, rt, ca, ap.trs(trs, 0, tab, U32.to_nat(wu), wu, ra, ar, rt, ap.pivs(pivs, 0, tab, U32.to_nat(wu), wu, ra, ar, a))))
-
-def ap.s3(+l: U32, +nrows: U32, +npiv: U32, +ntr: U32, +wu: U32, +tab: Bool, pivs: List<&2, PP>, trs: List<&2, TR>, tail: List<&2, TC>, rhs: List<&2, G.Vec>) -> F.Ar:
-  +ra = ap.tbsz(tab)
-  +ar = (ra + nrows * wu : U32)
-  +rt = (ar + npiv * wu : U32)
-  +ca = (rt + ntr * wu : U32)
-  +sc = (ca + l * wu : U32)
-  F.Ar{ap.run(pivs, trs, tail, tab, wu, ra, ar, rt, ca, F.Flat.fi_arr(F.Flat.lfill(rhs, wu, F.Fi{ra, ap.init(tab, Array.new(U32, clog((sc + wu : U32)), 0))}))), wu, ca, sc}
-
 # word count of the first rhs symbol (all symbols have the same length), list handed back
 type Pk is Data:
   Pk{wu: U32, xs: List<&2, G.Vec>}
@@ -2463,11 +2451,6 @@ def ap.peek(xs: List<&2, G.Vec>) -> Pk:
       Pk{0, Nil{}}
     case Con{+h, t}:
       Pk{F.Flat.words(h), Con{h, t}}
-
-def ap.s2(+l: U32, +nrows: U32, +npiv: U32, +ntr: U32, pivs: List<&2, PP>, trs: List<&2, TR>, tail: List<&2, TC>, pk: Pk) -> F.Ar:
-  match pk:
-    case Pk{+wu, xs}:
-      ap.s3(l, nrows, npiv, ntr, wu, U32.is_ge(wu, TAB_MIN()), pivs, trs, tail, xs)
 
 # ===========================================================================
 # 9b. The plan as a FLAT PROGRAM (docs/scaling.md): the replay of section 9 compiled into an Array<U32> of 3-word instructions

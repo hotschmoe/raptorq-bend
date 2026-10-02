@@ -2,7 +2,7 @@
 # min over reps of the BEND line fields: tools/scaling/bench_min.sh <binary> <reps> <threads> <K> <T> [N]
 # threads 1 -> pinned to cpu10; <= 8 -> the 8 big cores; 12 -> unpinned
 B=$1; R=$2; TH=$3; K=$4; T=$5; N=${6:-1000}
-if [ "$TH" = 1 ]; then PIN="taskset -c 10"; elif [ "$TH" -le 8 ]; then PIN="taskset -c 0,1,6,7,8,9,10,11"; else PIN=""; fi
+if [ "$TH" = 1 ]; then PIN="taskset -c ${PIN1:-10}"; elif [ "$TH" -le 8 ]; then PIN="taskset -c 0,1,6,7,8,9,10,11"; else PIN=""; fi
 for i in $(seq $R); do $PIN $B --threads $TH -- $K $T $N ${MODE:-0} | grep '^BEND'; done | python3 -c "
 import sys,re,collections
 best={}

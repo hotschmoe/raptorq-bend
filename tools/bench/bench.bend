@@ -101,8 +101,8 @@ def verdict(res: Maybe<&2, List<&2, G.Vec>>, src: List<&2, G.Vec>) -> U32:
     case Some{out}:
       b2u(syms_eq(out, src))
 
-def report(+k: U32, +t: U32, +n: U32, +thr: U32, +setup: Nat, +rep: Nat, +repw: Nat, +dec: Nat, +ok: U32) -> IO(Unit):
-  IO.print("BEND K=" ++ U32.show(k) ++ " T=" ++ U32.show(t) ++ " N=" ++ U32.show(n) ++ " threads=" ++ U32.show(thr) ++ " setup_ms=" ++ Nat.show(setup) ++ " repair_ms=" ++ Nat.show(rep) ++ " repair_walk_ms=" ++ Nat.show(repw) ++ " decode_ms=" ++ Nat.show(dec) ++ " ok=" ++ U32.show(ok))
+def report(+mode: U32, +k: U32, +t: U32, +n: U32, +thr: U32, +setup: Nat, +rep: Nat, +repw: Nat, +dec: Nat, +ok: U32) -> IO(Unit):
+  IO.print("BEND mode=" ++ U32.show(mode) ++ " K=" ++ U32.show(k) ++ " T=" ++ U32.show(t) ++ " N=" ++ U32.show(n) ++ " threads=" ++ U32.show(thr) ++ " setup_ms=" ++ Nat.show(setup) ++ " repair_ms=" ++ Nat.show(rep) ++ " repair_walk_ms=" ++ Nat.show(repw) ++ " decode_ms=" ++ Nat.show(dec) ++ " ok=" ++ U32.show(ok))
 
 def len_syms(xs: List<&2, G.Vec>, +acc: U32) -> U32:
   match xs:
@@ -118,7 +118,7 @@ def len_res(r: Maybe<&2, List<&2, G.Vec>>) -> U32:
     case Some{xs}:
       len_syms(xs, 0)
 
-def decode_phase(+e: Q.Enc, +k: U32, +t: U32, +n: U32, +thr: U32, +setup: Nat, +rep: Nat, +repw: Nat, src: List<&2, G.Vec>) -> IO(Unit):
+def decode_phase(+mode: U32, +e: Q.Enc, +k: U32, +t: U32, +n: U32, +thr: U32, +setup: Nat, +rep: Nat, +repw: Nat, src: List<&2, G.Vec>) -> IO(Unit):
   +rv = rcv.go(U32.to_nat(k), (k - 1 : U32), k, e, [])
   do IO<Unit>:
     IO.print("received built, checksum " ++ U32.show(fold_rcv(rv, 0)))
@@ -128,7 +128,7 @@ def decode_phase(+e: Q.Enc, +k: U32, +t: U32, +n: U32, +thr: U32, +setup: Nat, +
     +t3 : Nat <- IO.now()
     +ok : U32 <- IO.pure(U32, verdict(res, src))
     IO.print("decode ok=" ++ U32.show(ok) ++ " symbols=" ++ U32.show(nres))
-    report(k, t, n, thr, setup, rep, repw, (t3 - t2 : Nat), ok)
+    report(mode, k, t, n, thr, setup, rep, repw, (t3 - t2 : Nat), ok)
 
 # mode 1 reports the flat API's setup / repair times instead of the tree API's (the tree ones are still measured)
 def pick_phase(+mode: U32, fl: Tm, +e: Q.Enc, +k: U32, +t: U32, +n: U32, +thr: U32, +setup: Nat, +rep: Nat, +repw: Nat, src: List<&2, G.Vec>) -> IO(Unit):
@@ -136,9 +136,9 @@ def pick_phase(+mode: U32, fl: Tm, +e: Q.Enc, +k: U32, +t: U32, +n: U32, +thr: U
     case 1:
       match fl:
         case Tm{a, b}:
-          decode_phase(e, k, t, n, thr, a, b, 0n, src)
+          decode_phase(mode, e, k, t, n, thr, a, b, 0n, src)
     case _:
-      decode_phase(e, k, t, n, thr, setup, rep, repw, src)
+      decode_phase(mode, e, k, t, n, thr, setup, rep, repw, src)
 
 def enc_phase(m: Maybe<&2, Q.Enc>, +k: U32, +t: U32, +n: U32, +thr: U32, +t0: Nat, +fl: Tm, +mode: U32, src: List<&2, G.Vec>) -> IO(Unit):
   match m:

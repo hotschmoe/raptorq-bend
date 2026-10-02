@@ -35,6 +35,23 @@ rhs symbol per row (same order). `solve_p`, `solve`, `solve_par`, `solve_auto` a
 `solver_test` / `solver_golden_test` check apply(plan) against the known / RFC solutions and reuse one plan on two other payloads
 (T = 4 octets, and T doubled); `codec_plan_test` does the same on the golden codec vectors.
 
+## Phase 1 on flat arrays (default `Solver.plan`; the list version below is `Solver.plan_ref`)
+Phase 1 + row bookkeeping was 22 ms (K = 1000) / 123 ms (K = 4000) of every solve, independent of T. `Solver.plan` now runs it on ONE `Array<U32>`
+(`src/solver.bend` section 6b; design notes in the file header there): rows as sorted packed terms (`col * 256 + coef`, insertion sort + duplicate merge,
+the HDPC rows are kept as their raw term list and xored into the phase-2 arena, no sort and no `Vec` fold: that alone was 55 of 140 ms at K = 4000),
+the column -> rows index as a static CSR (counting sort), buckets by weight as doubly linked lists in the array, a global state per column
+(0 active / 1 pivot / 2 + position inactive). The observation that makes the loop cheap: a row's active part is its original terms in still-active
+columns and never changes otherwise (no fill-in), so a pivot step only (1) pops the head of the lowest bucket, (2) scans that row's active prefix
+to find the pivot column (the first still-active one) and the columns to inactivate, (3) decrements the weight of every live row in the index lists of
+the removed columns (a touched list keeps the order of first touch) and moves those rows to the head of their new bucket. The logs `(g, j)` and the
+inactive terms of every row are derived after the loop from the final column states (a term in a pivot column of pivot j2 is a log entry with
+g = coef / frozen coefficient of j2; a term in an inactivated column is an inactive term at that position), in the shapes `Pv` / leftover `Sp` that
+phase 2 already consumes. The visiting orders replicate the list version (descending ids in the column lists, same LIFO buckets), so the pivots come out
+in the same order: `tests/solver_plan_test.bend` compares the two plans structurally (the logs as multisets, their order is irrelevant for a sum).
+Measured (rows built inside the clock, 1 thread, min of 5): K = 1000 / 4000 / 10000: reference 26 / 152 / 467 ms -> 10 / 57 / 179 ms.
+Remaining plan time at K = 4000 (about 44 ms without the 8-11 ms of row construction): ingest ~3, index + loop ~3, post lists ~7, phase 2 (pivot
+vectors, dense correction, tail Gauss-Jordan, TC lists) ~27 ms.
+
 ## Coefficient arena (plan, materialisation + phase 2)
 The coefficient side of the plan (pivot coefficient vectors V_k over the tail columns Ci, the leftover sparse rows, the dense rows
 corrected for every pivot, and the tail Gauss-Jordan with unit vectors as rhs) runs on one flat `Array<U32>` too: coefficients are packed

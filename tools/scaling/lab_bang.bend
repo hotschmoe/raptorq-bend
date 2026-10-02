@@ -1,7 +1,7 @@
+# Scaling lab WITH bang variants (modes 20..25 = modes 0, 1, 3, 2, 5, 6 with the entry call `f!(..)`); same as lab.bend otherwise.  Build with clang 19
+# (docs/scaling.md section H) and run with --gpu off.  Because the program contains `!`, the whole binary runs without the single-thread `seq` fast path.
 # Scaling lab (docs/scaling.md): what pure Bend scales on this machine.
 #   bend tools/scaling/lab.bend -o build/scaling/lab        (system clang first in PATH, see CLAUDE.md)
-# NO `!` call anywhere in this file: a program that contains a bang is compiled without the single-thread fast path (`seq`) for ALL its code (docs/scaling.md),
-# which changes the 1-thread baseline.  The banged variants (modes 20..25) are in lab_bang.bend.
 #   ./build/scaling/lab --threads N -- <mode> <D> <w> <reps> <extra>
 # Prints  LAB mode=.. D=.. w=.. reps=.. extra=.. threads=.. ms=.. chk=..
 # Modes (2^D leaves of 2^w words, `reps` read-modify-write passes per leaf = the work knob):
@@ -20,6 +20,7 @@
 #  12 shared    repair-generation shape: ONE shared read-only array S of 2^extra symbols (2^w words each) handed to the leaves of a fork
 #               tree with Array.fork; each leaf XORs `reps` pseudo-random symbols of S into its own freshly allocated output symbol
 #               (only the parallel part is timed)
+#  20..25      the entry call banged `f!(..)`: 20 = 0, 21 = 1, 22 = 3, 23 = 2, 24 = 5, 25 = 6 (clang 19, run with --gpu off)
 #  15 sharedclone as 12 but the handles come from Array.clone (a copy per node of the tree; no unsafe def)
 #  13 sharedlist a Data list (the shape of a Solver.Plan, 2^w elements) walked `reps` times by every leaf of a fork tree
 #  14 ownlist    as 13 but every leaf builds its own copy of the list
@@ -408,6 +409,14 @@ def sl.tree2(+d: Nat, +reps: Nat, +w: Nat) -> U32:
       a b = sl.tree2(p, reps, w) sl.tree2(p, reps, w)
       (a + b : U32)
 
+# ---- bang (`f!(..)`) variants: modes 20..24 are 0, 1, 3, 2, 5 with the entry call banged (needs clang 19: docs/scaling.md section H) ----
+def seqforks.b(+n: Nat, +d: Nat, +w: Nat, +reps: Nat, +acc: U32) -> U32:
+  match n:
+    case 0n:
+      acc
+    case 1n+q:
+      seqforks.b(q, d, w, reps, (acc + tree!(d, w, reps) : U32))
+
 # ---- driver --------------------------------------------------------------------------------------------------------
 def run(+mode: U32, +d: Nat, +w: Nat, +reps: Nat, +extra: Nat) -> U32:
   match mode:
@@ -437,6 +446,18 @@ def run(+mode: U32, +d: Nat, +w: Nat, +reps: Nat, +extra: Nat) -> U32:
       treezipf(10, w, reps)
     case 11:
       treezipf(11, w, reps)
+    case 20:
+      tree!(d, w, reps)
+    case 21:
+      seqforks.b(extra, d, w, reps, 0)
+    case 22:
+      tree3!(d, w, reps)
+    case 23:
+      wrapped!(d, extra, w, reps)
+    case 24:
+      split.run!(d, w, reps)
+    case 25:
+      chunks!(d, w, reps)
     case 7:
       serial(pow2n(d), w, reps, 0)
     case _:

@@ -133,3 +133,17 @@ Gauss-Jordan with unit vectors) also runs on a flat arena now (`p2.*`, docs/solv
 and `Solver.auto_depth` slices the symbols only for blocks of >= 2^23 words (the arena apply costs 4 ns/word, so 8 slices lose against their fork rounds;
 12-thread numbers now equal 1-thread numbers at the benchmark sizes), `decode_auto` / `decode_with_plan_auto` take the arena path then.
 Current one-shot numbers: docs/benchmarks.md.
+
+## Update 2: the plan as a flat program, sliced apply as ONE parallel region, phase 1 on flat arrays (docs/scaling.md)
+* **Flat program.** `Solver.prog(plan)` compiles a `Plan` into an `Array<U32>` of 3-word instructions (`kind + (c << 8)`, destination symbol,
+  source symbol: copy / d ^= c*s / d = c*s / d = c*d / zero) in the order the list replay used (2 ms at K = 1000, 9 ms at K = 4000), and
+  `Solver.apply` / `apply_arena` interpret it (`ip.*`): no list walk per apply. K = 1000, T = 1024, 1 thread: `apply` incl. read-out 45 -> 37 ms. Instruction mix of
+  the K = 1000 encoder program (`tools/scaling/prog_stats.bend`): 33763 instructions = 2063 copies, 14695 xors (c = 1), 15934 multiply-adds, 79 sets, 992 scales;
+  the multiply-adds are the 10 dense (HDPC) tail rows over all pivots (~9.9K) and the dense tail solution (79 x 79): about half of the symbol arithmetic.
+* **Sliced apply.** `Solver.apply_par(d, plan, rhs)` clones the program per task (`Array.clone`; the plan's lists shared by all tasks were the scaling trap of the
+  earlier slicing, docs/scaling.md G) and runs ONE fork tree of 2^d tasks: each builds its own arena from its word slice of every rhs symbol (the subtrees of the
+  balanced `Vec` at depth d), replays the program, reads out; the slices are joined per symbol. `Solver.apply_ars` keeps the slice arenas (linear flat encoder,
+  docs/codec.md); sliced decode re-encodes the source symbols inside each task. `Solver.auto_depth` now slices from 2^18 words of symbol data (was 2^23).
+* **Flat phase 1.** `Solver.plan` runs phase 1 on one `Array<U32>` (docs/solver.md); the list version is `Solver.plan_ref` (test oracle, `tests/solver_plan_test.bend`).
+  Plan K = 1000 / 4000 / 10000: 26 / 152 / 467 -> 10 / 57 / 179 ms (1 thread, rows built inside the clock).
+* `Flat.table` is built by doubling (one read + one write per entry instead of a `G.mul`): 1.3 ms -> ~0.3 ms per table, which matters once every slice builds its own.
